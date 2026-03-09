@@ -11,6 +11,8 @@ Usage:
   C:\\Python313\\python scripts/ingest.py
   C:\\Python313\\python scripts/ingest.py --provider azure
   C:\\Python313\\python scripts/ingest.py --fresh-raindrop   (also pulls live from Raindrop API)
+  C:\\Python313\\python scripts/ingest.py --skip-neo4j        (ChromaDB only, no Neo4j required)
+  C:\\Python313\\python scripts/ingest.py --skip-similar      (skip SIMILAR_TO edge computation)
 """
 
 import sys
@@ -59,8 +61,9 @@ def build_similar_to_edges(items: list[dict], embedder, top_k: int = 5):
 
 def main():
     parser = argparse.ArgumentParser(description="OpenMark Ingest Pipeline")
-    parser.add_argument("--provider",        default=None, help="Embedding provider: local or azure")
+    parser.add_argument("--provider",        default=None,  help="Embedding provider: local or azure")
     parser.add_argument("--fresh-raindrop",  action="store_true", help="Also pull fresh from Raindrop API")
+    parser.add_argument("--skip-neo4j",      action="store_true", help="Skip Neo4j entirely (ChromaDB only)")
     parser.add_argument("--skip-similar",    action="store_true", help="Skip SIMILAR_TO edge computation")
     args = parser.parse_args()
 
@@ -84,20 +87,24 @@ def main():
     print("\n[3/4] Ingesting into ChromaDB...")
     chroma_store.ingest(items, embedder)
 
-    # Step 4: Neo4j
-    print("\n[4/4] Ingesting into Neo4j...")
-    neo4j_store.ingest(items)
+    # Step 4: Neo4j (optional)
+    if not args.skip_neo4j:
+        print("\n[4/4] Ingesting into Neo4j...")
+        neo4j_store.ingest(items)
 
-    # Step 5: SIMILAR_TO edges
-    if not args.skip_similar:
-        build_similar_to_edges(items, embedder, top_k=5)
+        # Step 5: SIMILAR_TO edges
+        if not args.skip_similar:
+            build_similar_to_edges(items, embedder, top_k=5)
+    else:
+        print("\n[4/4] Neo4j skipped.")
 
     print("\n" + "=" * 60)
     print("INGEST COMPLETE")
     chroma = chroma_store.get_stats()
-    neo4j  = neo4j_store.get_stats()
     print(f"  ChromaDB: {chroma.get('total', 0)} vectors")
-    print(f"  Neo4j:    {neo4j.get('bookmarks', 0)} bookmarks, {neo4j.get('tags', 0)} tags")
+    if not args.skip_neo4j:
+        neo4j  = neo4j_store.get_stats()
+        print(f"  Neo4j:    {neo4j.get('bookmarks', 0)} bookmarks, {neo4j.get('tags', 0)} tags")
     print("=" * 60)
     print("\nNow run: C:\\Python313\\python scripts/search.py \"your query\"")
     print("     or: C:\\Python313\\python -m openmark.ui.app")
