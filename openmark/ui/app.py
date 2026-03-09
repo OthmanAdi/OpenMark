@@ -120,63 +120,85 @@ def stats_fn():
 # ── Build UI ──────────────────────────────────────────────────
 
 def build_ui():
-    categories = ["All"] + config.CATEGORIES
-
     with gr.Blocks(title="OpenMark") as app:
         gr.Markdown("# OpenMark — Your Personal Knowledge Graph")
 
-        with gr.Tabs():
+        if _setup_error:
+            # No credentials — show landing page only
+            gr.Markdown(
+                "**8,000+ bookmarks, LinkedIn saves, and YouTube videos** indexed with "
+                "[pplx-embed](https://huggingface.co/collections/perplexity-ai/pplx-embed), "
+                "searchable with ChromaDB and Neo4j, queryable via a LangGraph agent.\n\n"
+                "Built by [Ahmad Othman Ammar Adi](https://github.com/OthmanAdi) · "
+                "[GitHub](https://github.com/OthmanAdi/OpenMark) · "
+                "[Dataset](https://huggingface.co/datasets/codingwithadi/openmark-bookmarks)\n\n"
+                "---\n\n"
+                "## Run it yourself\n\n"
+                "This Space requires your own data and credentials. "
+                "Clone the repo and follow the setup guide:\n\n"
+                "```bash\n"
+                "git clone https://github.com/OthmanAdi/OpenMark.git\n"
+                "cd OpenMark\n"
+                "pip install -r requirements.txt\n"
+                "cp .env.example .env  # add your keys\n"
+                "python scripts/ingest.py\n"
+                "python openmark/ui/app.py\n"
+                "```"
+            )
+        else:
+            categories = ["All"] + config.CATEGORIES
+            with gr.Tabs():
 
-            # Tab 1: Chat
-            with gr.Tab("Chat"):
-                thread = gr.Textbox(value="default", label="Session ID", scale=1)
-                chatbot = gr.Chatbot(height=500)
-                msg_box = gr.Textbox(
-                    placeholder="Ask anything about your saved bookmarks...",
-                    label="Message", lines=2,
-                )
-                send_btn = gr.Button("Send", variant="primary")
+                # Tab 1: Chat
+                with gr.Tab("Chat"):
+                    thread = gr.Textbox(value="default", label="Session ID", scale=1)
+                    chatbot = gr.Chatbot(height=500)
+                    msg_box = gr.Textbox(
+                        placeholder="Ask anything about your saved bookmarks...",
+                        label="Message", lines=2,
+                    )
+                    send_btn = gr.Button("Send", variant="primary")
 
-                send_btn.click(
-                    chat_fn,
-                    inputs=[msg_box, chatbot, thread],
-                    outputs=[chatbot, msg_box],
-                )
-                msg_box.submit(
-                    chat_fn,
-                    inputs=[msg_box, chatbot, thread],
-                    outputs=[chatbot, msg_box],
-                )
+                    send_btn.click(
+                        chat_fn,
+                        inputs=[msg_box, chatbot, thread],
+                        outputs=[chatbot, msg_box],
+                    )
+                    msg_box.submit(
+                        chat_fn,
+                        inputs=[msg_box, chatbot, thread],
+                        outputs=[chatbot, msg_box],
+                    )
 
-            # Tab 2: Search
-            with gr.Tab("Search"):
-                with gr.Row():
-                    q_input   = gr.Textbox(placeholder="Search your knowledge base...", label="Query", scale=3)
-                    cat_input = gr.Dropdown(categories, value="All", label="Category")
-                with gr.Row():
-                    score_input = gr.Slider(0, 10, value=0, step=1, label="Min Quality Score")
-                    n_input     = gr.Slider(5, 50, value=10, step=5, label="Results")
-                search_btn    = gr.Button("Search", variant="primary")
-                search_output = gr.Markdown()
+                # Tab 2: Search
+                with gr.Tab("Search"):
+                    with gr.Row():
+                        q_input   = gr.Textbox(placeholder="Search your knowledge base...", label="Query", scale=3)
+                        cat_input = gr.Dropdown(categories, value="All", label="Category")
+                    with gr.Row():
+                        score_input = gr.Slider(0, 10, value=0, step=1, label="Min Quality Score")
+                        n_input     = gr.Slider(5, 50, value=10, step=5, label="Results")
+                    search_btn    = gr.Button("Search", variant="primary")
+                    search_output = gr.Markdown()
 
-                search_btn.click(
-                    search_fn,
-                    inputs=[q_input, cat_input, score_input, n_input],
-                    outputs=search_output,
-                )
-                q_input.submit(
-                    search_fn,
-                    inputs=[q_input, cat_input, score_input, n_input],
-                    outputs=search_output,
-                )
+                    search_btn.click(
+                        search_fn,
+                        inputs=[q_input, cat_input, score_input, n_input],
+                        outputs=search_output,
+                    )
+                    q_input.submit(
+                        search_fn,
+                        inputs=[q_input, cat_input, score_input, n_input],
+                        outputs=search_output,
+                    )
 
-            # Tab 3: Stats
-            with gr.Tab("Stats"):
-                refresh_btn  = gr.Button("Refresh Stats")
-                stats_output = gr.Markdown()
+                # Tab 3: Stats
+                with gr.Tab("Stats"):
+                    refresh_btn  = gr.Button("Refresh Stats")
+                    stats_output = gr.Markdown()
 
-                refresh_btn.click(stats_fn, outputs=stats_output)
-                app.load(stats_fn, outputs=stats_output)
+                    refresh_btn.click(stats_fn, outputs=stats_output)
+                    app.load(stats_fn, outputs=stats_output)
 
     return app
 
