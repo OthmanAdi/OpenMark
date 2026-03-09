@@ -37,8 +37,7 @@ except Exception as e:
 _NOT_READY = (
     "## Setup required\n\n"
     "This Space is a **demo shell** — it requires your own credentials to run.\n\n"
-    "See the [GitHub repo](https://github.com/OthmanAdi/OpenMark) for full setup instructions.\n\n"
-    f"```\n{_setup_error}\n```" if _setup_error else ""
+    "See the [GitHub repo](https://github.com/OthmanAdi/OpenMark) for full setup instructions."
 )
 
 
