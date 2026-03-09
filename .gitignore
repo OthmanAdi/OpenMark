@@ -1,0 +1,51 @@
+# ── Credentials — NEVER commit ───────────────────────────────
+.env
+
+# ── Personal data — your bookmark vectors ────────────────────
+data/chroma_db/
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+
+# ── IDE ───────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Logs & temp ───────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
+
+# ── HuggingFace cache (large model files) ────────────────────
+.cache/
+
+# ── Raw data exports — personal, not for the repo ────────────
+raindrop-mission/
+data/linkedin_saved.json
+data/youtube_MASTER.json
+data/CATEGORIZED.json
+
+# Utility scripts (local only)
+nsfw_*.py
+nsfw_*.json
+scan_nsfw.py
+_purge_now.py
