@@ -11,22 +11,41 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 sys.stdout.reconfigure(encoding="utf-8")
 
 import gradio as gr
-from openmark.agent.graph import build_agent, ask
-from openmark.embeddings.factory import get_embedder
-from openmark.stores import chroma as chroma_store
-from openmark.stores import neo4j_store
 from openmark import config
 
-# Load once at startup
+# Load once at startup — fail gracefully if credentials are not configured
 print("Loading OpenMark...")
-_embedder = get_embedder()
-_agent    = build_agent()
-print("OpenMark ready.")
+_embedder = None
+_agent    = None
+_setup_error = None
+
+try:
+    from openmark.embeddings.factory import get_embedder
+    from openmark.agent.graph import build_agent, ask
+    from openmark.stores import chroma as chroma_store
+    from openmark.stores import neo4j_store
+    _embedder = get_embedder()
+    _agent    = build_agent()
+    print("OpenMark ready.")
+except Exception as e:
+    _setup_error = str(e)
+    print(f"OpenMark setup incomplete: {e}")
 
 
 # ── Chat tab ──────────────────────────────────────────────────
 
+_NOT_READY = (
+    "## Setup required\n\n"
+    "This Space is a **demo shell** — it requires your own credentials to run.\n\n"
+    "See the [GitHub repo](https://github.com/OthmanAdi/OpenMark) for full setup instructions.\n\n"
+    f"```\n{_setup_error}\n```" if _setup_error else ""
+)
+
+
 def chat_fn(message: str, history: list, thread_id: str):
+    if _agent is None:
+        history.append((message, _NOT_READY))
+        return history, ""
     if not message.strip():
         return history, ""
     response = ask(_agent, message, thread_id=thread_id or "default")
@@ -37,6 +56,8 @@ def chat_fn(message: str, history: list, thread_id: str):
 # ── Search tab ────────────────────────────────────────────────
 
 def search_fn(query: str, category: str, min_score: float, n_results: int):
+    if _embedder is None:
+        return _NOT_READY
     if not query.strip():
         return "Enter a search query."
 
@@ -65,6 +86,8 @@ def search_fn(query: str, category: str, min_score: float, n_results: int):
 # ── Stats tab ─────────────────────────────────────────────────
 
 def stats_fn():
+    if _embedder is None:
+        return _NOT_READY
     chroma = chroma_store.get_stats()
     neo4j  = neo4j_store.get_stats()
 

@@ -173,6 +173,12 @@ python scripts/ingest.py --provider azure
 
 # Also pull fresh from Raindrop API during ingest
 python scripts/ingest.py --fresh-raindrop
+
+# Skip SIMILAR_TO edge computation (saves 25-40 min, Neo4j still required)
+python scripts/ingest.py --skip-similar
+
+# ChromaDB only — skip Neo4j entirely (Neo4j not required)
+python scripts/ingest.py --skip-neo4j
 ```
 
 ### 4. Search (CLI)
