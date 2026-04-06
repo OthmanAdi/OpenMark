@@ -1,3 +1,7 @@
+<div align="center">
+<img src="media/banner.png" alt="OpenMark" width="100%">
+</div>
+
 # OpenMark
 
 **Your personal knowledge graph — built from everything you've ever saved.**
