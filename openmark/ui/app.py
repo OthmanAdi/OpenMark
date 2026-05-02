@@ -664,6 +664,89 @@ def build_ui():
                         )
                         graph_btn.click(graph_fn, inputs=[graph_limit], outputs=graph_output)
 
+            # ── Tab 5: Add Bookmarks ───────────────────────────────────────
+            with gr.Tab("+ Add"):
+                gr.HTML("""
+                <div style='color:#64748b;font-size:0.83em;padding:4px 0 10px'>
+                  Drop URLs or a file — parsed, deduped, embedded and searchable immediately.
+                  Supports: plain URLs · Edge/Chrome HTML export · JSON · .txt
+                </div>""")
+                with gr.Row():
+                    add_urls = gr.Textbox(
+                        placeholder="Paste one or more URLs here, one per line...\nhttps://github.com/something\nhttps://arxiv.org/paper...",
+                        label="Paste URLs",
+                        lines=6,
+                        scale=1,
+                    )
+                    add_file = gr.File(
+                        label="Or upload a file (HTML / JSON / TXT)",
+                        file_types=[".html", ".htm", ".json", ".txt"],
+                        scale=1,
+                    )
+                with gr.Row():
+                    add_fetch = gr.Checkbox(value=True, label="Fetch page titles (slower but better search)")
+                    add_btn = gr.Button("Add to Knowledge Base", variant="primary", scale=2)
+                add_output = gr.HTML(value="")
+
+                def add_fn(url_text: str, file_obj, fetch_titles: bool):
+                    from openmark.pipeline.injector import (
+                        extract_urls_from_text, urls_to_items,
+                        parse_html_file, parse_json_file, parse_txt_file,
+                        run_injection,
+                    )
+                    items = []
+                    errors = []
+
+                    # Parse file if provided
+                    if file_obj is not None:
+                        path = file_obj.name if hasattr(file_obj, 'name') else str(file_obj)
+                        ext = os.path.splitext(path)[1].lower()
+                        try:
+                            if ext in (".html", ".htm"):
+                                items.extend(parse_html_file(path))
+                            elif ext == ".json":
+                                items.extend(parse_json_file(path))
+                            else:
+                                items.extend(parse_txt_file(path, fetch_titles=fetch_titles))
+                        except Exception as e:
+                            errors.append(f"File parse error: {e}")
+
+                    # Parse pasted URLs
+                    if url_text and url_text.strip():
+                        urls = extract_urls_from_text(url_text)
+                        if urls:
+                            items.extend(urls_to_items(urls, fetch_titles=fetch_titles))
+
+                    if not items:
+                        return "<p style='color:#f97316;padding:8px'>No URLs found. Paste URLs or upload a file.</p>"
+
+                    try:
+                        stats = run_injection(items, embedder=_embedder)
+                        color = "#22c55e" if stats["new"] > 0 else "#64748b"
+                        msg = (
+                            f"<div style='padding:12px;background:#0f172a;border-radius:8px;border:1px solid #1e293b;font-family:sans-serif'>"
+                            f"<div style='color:{color};font-size:1.1em;font-weight:700;margin-bottom:6px'>"
+                            f"{'✅' if stats['new'] > 0 else '—'} "
+                            f"{'Added ' + str(stats['new']) + ' new bookmarks' if stats['new'] > 0 else 'No new bookmarks added'}"
+                            f"</div>"
+                            f"<div style='color:#64748b;font-size:0.85em'>"
+                            f"Parsed: {stats['total']} &nbsp;·&nbsp; New: {stats['new']} &nbsp;·&nbsp; Duplicates skipped: {stats['skipped']}"
+                            f"</div>"
+                            + (f"<div style='color:#94a3b8;font-size:0.82em;margin-top:6px'>Immediately searchable in the Search tab.</div>" if stats["new"] > 0 else "")
+                            + (f"<div style='color:#ef4444;font-size:0.82em;margin-top:4px'>Errors: {'; '.join(errors)}</div>" if errors else "")
+                            + "</div>"
+                        )
+                        return msg
+                    except Exception as e:
+                        return f"<p style='color:#ef4444'>Injection error: {e}</p>"
+
+                add_btn.click(
+                    add_fn,
+                    inputs=[add_urls, add_file, add_fetch],
+                    outputs=add_output,
+                    show_progress="full",
+                )
+
     return app
 
 
