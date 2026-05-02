@@ -39,4 +39,8 @@ class AzureEmbedder(EmbeddingProvider):
 
     @property
     def dimension(self) -> int:
-        return 1536  # ada-002 dimension
+        return {
+            "text-embedding-3-large": 3072,
+            "text-embedding-3-small": 1536,
+            "text-embedding-ada-002": 1536,
+        }.get(self._deployment, 1536)

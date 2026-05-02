@@ -1,18 +1,19 @@
 """
-OpenMark Full Ingest Pipeline
-Run this once (or again to update) to:
-  1. Merge all data sources (CATEGORIZED.json + LinkedIn + YouTube)
-  2. Embed everything with chosen provider (local pplx-embed or Azure)
-  3. Store in ChromaDB (semantic search)
-  4. Store in Neo4j (knowledge graph)
-  5. Compute SIMILAR_TO edges (top-5 neighbors per bookmark → graph edges)
+OpenMark Full Ingest Pipeline — Graph RAG (Neo4j only)
+
+Steps:
+  1. Merge all data sources
+  2. Load pplx-embed-context-v1-0.6B embedder
+  3. Embed all items locally
+  4. Store in Neo4j (nodes + embeddings + relationships)
+  5. Build SIMILAR_TO edges via Neo4j vector index
+  6. Run Louvain community detection (requires GDS plugin)
 
 Usage:
-  C:\\Python313\\python scripts/ingest.py
-  C:\\Python313\\python scripts/ingest.py --provider azure
-  C:\\Python313\\python scripts/ingest.py --fresh-raindrop   (also pulls live from Raindrop API)
-  C:\\Python313\\python scripts/ingest.py --skip-neo4j        (ChromaDB only, no Neo4j required)
-  C:\\Python313\\python scripts/ingest.py --skip-similar      (skip SIMILAR_TO edge computation)
+  python scripts/ingest.py
+  python scripts/ingest.py --fresh-raindrop   # also pull live from Raindrop API
+  python scripts/ingest.py --skip-similar     # skip SIMILAR_TO edge computation
+  python scripts/ingest.py --skip-louvain     # skip community detection
 """
 
 import sys
@@ -24,90 +25,73 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from openmark.pipeline.merge import merge_all
 from openmark.embeddings.factory import get_embedder
-from openmark.stores import chroma as chroma_store
 from openmark.stores import neo4j_store
 from openmark import config
 
 
-def build_similar_to_edges(items: list[dict], embedder, top_k: int = 5):
-    """
-    For each item, find its top-k nearest neighbors in ChromaDB
-    and write SIMILAR_TO edges in Neo4j.
-    This creates the semantic web inside the graph.
-    """
-    print(f"\nBuilding SIMILAR_TO edges (top-{top_k} per bookmark)...")
-    pairs = []
-    total = len(items)
-
-    for i, item in enumerate(items):
-        url = item["url"]
-        try:
-            results = chroma_store.search(
-                item["doc_text"], embedder, n=top_k + 1
-            )
-            for r in results:
-                if r["url"] != url and r["similarity"] > 0.5:
-                    pairs.append((url, r["url"], r["similarity"]))
-        except Exception:
-            pass
-
-        if (i + 1) % 500 == 0:
-            print(f"  Processed {i+1}/{total} for SIMILAR_TO")
-
-    print(f"  Writing {len(pairs)} SIMILAR_TO edges to Neo4j...")
-    neo4j_store.add_similar_to_edges(pairs)
-    print("  SIMILAR_TO done.")
-
-
 def main():
     parser = argparse.ArgumentParser(description="OpenMark Ingest Pipeline")
-    parser.add_argument("--provider",        default=None,  help="Embedding provider: local or azure")
-    parser.add_argument("--fresh-raindrop",  action="store_true", help="Also pull fresh from Raindrop API")
-    parser.add_argument("--skip-neo4j",      action="store_true", help="Skip Neo4j entirely (ChromaDB only)")
-    parser.add_argument("--skip-similar",    action="store_true", help="Skip SIMILAR_TO edge computation")
+    parser.add_argument("--fresh-raindrop", action="store_true", help="Pull fresh from Raindrop API")
+    parser.add_argument("--skip-similar",   action="store_true", help="Skip SIMILAR_TO edge computation")
+    parser.add_argument("--skip-louvain",   action="store_true", help="Skip Louvain community detection")
     args = parser.parse_args()
 
-    if args.provider:
-        os.environ["EMBEDDING_PROVIDER"] = args.provider
-
     print("=" * 60)
-    print("OPENMARK INGEST PIPELINE")
-    print(f"Embedding: {config.EMBEDDING_PROVIDER}")
+    print("OPENMARK INGEST — GRAPH RAG")
+    print(f"Embedding:  {config.EMBEDDING_PROVIDER} ({config.pplx_dimension()}-dim)")
+    print(f"Neo4j:      {config.NEO4J_URI} / db:{config.NEO4J_DATABASE}")
     print("=" * 60)
 
-    # Step 1: Merge all sources
     print("\n[1/4] Merging data sources...")
     items = merge_all(include_fresh_raindrop=args.fresh_raindrop)
 
-    # Step 2: Load embedder
     print(f"\n[2/4] Loading {config.EMBEDDING_PROVIDER} embedder...")
     embedder = get_embedder()
 
-    # Step 3: ChromaDB
-    print("\n[3/4] Ingesting into ChromaDB...")
-    chroma_store.ingest(items, embedder)
+    print(f"\n[3/4] Checking for new items...")
+    try:
+        existing_urls = set(
+            r["url"] for r in neo4j_store.query("MATCH (b:Bookmark) RETURN b.url AS url")
+        )
+        new_items = [i for i in items if i["url"] not in existing_urls]
+        print(f"  Neo4j has {len(existing_urls):,} items already. {len(new_items):,} new to embed.")
+    except Exception:
+        # Neo4j empty or first run — embed everything
+        new_items = items
+        print(f"  First run — embedding all {len(new_items):,} items.")
 
-    # Step 4: Neo4j (optional)
-    if not args.skip_neo4j:
-        print("\n[4/4] Ingesting into Neo4j...")
-        neo4j_store.ingest(items)
-
-        # Step 5: SIMILAR_TO edges
-        if not args.skip_similar:
-            build_similar_to_edges(items, embedder, top_k=5)
+    if not new_items:
+        print("  Nothing new. Skipping embed + ingest.")
     else:
-        print("\n[4/4] Neo4j skipped.")
+        print(f"\n  Embedding {len(new_items)} items ({embedder.dimension}-dim)...")
+        texts = [i["doc_text"] for i in new_items]
+        embeddings = embedder.embed_documents(texts)
+        print(f"  Done — {len(embeddings)} vectors")
+
+        print("\n[4/4] Ingesting into Neo4j...")
+        neo4j_store.ingest(new_items, embeddings=embeddings)
+
+    if not args.skip_similar:
+        print("\nBuilding SIMILAR_TO edges via vector index...")
+        neo4j_store.build_similar_to_edges()
+
+        if not args.skip_louvain:
+            print("\nRunning Louvain community detection...")
+            neo4j_store.setup_louvain()
+    else:
+        print("\nSIMILAR_TO + Louvain skipped.")
 
     print("\n" + "=" * 60)
     print("INGEST COMPLETE")
-    chroma = chroma_store.get_stats()
-    print(f"  ChromaDB: {chroma.get('total', 0)} vectors")
-    if not args.skip_neo4j:
-        neo4j  = neo4j_store.get_stats()
-        print(f"  Neo4j:    {neo4j.get('bookmarks', 0)} bookmarks, {neo4j.get('tags', 0)} tags")
+    try:
+        stats = neo4j_store.get_stats()
+        print(f"  Bookmarks:   {stats.get('bookmarks', 0):,}")
+        print(f"  Tags:        {stats.get('tags', 0):,}")
+        print(f"  Communities: {stats.get('communities', 0)}")
+    except Exception as e:
+        print(f"  Stats error: {e}")
     print("=" * 60)
-    print("\nNow run: C:\\Python313\\python scripts/search.py \"your query\"")
-    print("     or: C:\\Python313\\python -m openmark.ui.app")
+    print("\nRun: python -m openmark.ui.app")
 
 
 if __name__ == "__main__":

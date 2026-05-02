@@ -1,12 +1,21 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"), override=True)
 
 # Embedding
 EMBEDDING_PROVIDER     = os.getenv("EMBEDDING_PROVIDER", "local")
 PPLX_QUERY_MODEL       = os.getenv("PPLX_QUERY_MODEL", "perplexity-ai/pplx-embed-v1-0.6b")
 PPLX_DOC_MODEL         = os.getenv("PPLX_DOC_MODEL", "perplexity-ai/pplx-embed-context-v1-0.6b")
+
+def pplx_dimension() -> int:
+    """Derive embedding dimension from configured doc model name."""
+    return 2560 if "4b" in PPLX_DOC_MODEL.lower() else 1024
+
+# Agent
+AGENT_PROVIDER         = os.getenv("AGENT_PROVIDER", "azure")   # "azure" or "local"
+BONSAI_URL             = os.getenv("BONSAI_URL", "http://localhost:8080/v1")
+BONSAI_MODEL           = os.getenv("BONSAI_MODEL", "bonsai-1.7b")
 
 # Azure
 AZURE_ENDPOINT         = os.getenv("AZURE_ENDPOINT")

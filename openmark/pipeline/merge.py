@@ -1,7 +1,8 @@
 """
 Merge ALL data sources into one clean list:
   - CATEGORIZED.json  (Edge + old Raindrop + daily.dev — already categorized)
-  - linkedin_saved.json  (1,260 LinkedIn posts)
+  - edge_bookmarks.json  (parsed from Edge HTML export)
+  - linkedin_saved.json  (LinkedIn saved posts)
   - youtube_MASTER.json  (liked + watch_later + playlists)
   - Fresh Raindrop pull  (new items not yet in CATEGORIZED)
 
@@ -13,12 +14,27 @@ import os
 from openmark import config
 from openmark.pipeline.normalize import normalize_item, dedupe
 
+EDGE_BOOKMARKS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "data", "edge_bookmarks.json"
+)
+
 
 def load_categorized() -> list[dict]:
     path = os.path.join(config.RAINDROP_MISSION_DIR, "CATEGORIZED.json")
     with open(path, encoding="utf-8") as f:
         items = json.load(f)
     print(f"CATEGORIZED.json: {len(items)} items")
+    return items
+
+
+def load_edge_bookmarks() -> list[dict]:
+    path = os.path.normpath(EDGE_BOOKMARKS_PATH)
+    if not os.path.exists(path):
+        print("Edge bookmarks: file not found, skipping")
+        return []
+    with open(path, encoding="utf-8") as f:
+        items = json.load(f)
+    print(f"Edge bookmarks: {len(items)} items")
     return items
 
 
@@ -80,6 +96,7 @@ def merge_all(include_fresh_raindrop: bool = False) -> list[dict]:
     all_items = []
 
     all_items.extend(load_categorized())
+    all_items.extend(load_edge_bookmarks())
     all_items.extend(load_linkedin())
     all_items.extend(load_youtube())
 

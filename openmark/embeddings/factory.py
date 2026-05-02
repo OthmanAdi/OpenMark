@@ -11,5 +11,8 @@ def get_embedder() -> EmbeddingProvider:
     elif provider == "azure":
         from openmark.embeddings.azure import AzureEmbedder
         return AzureEmbedder()
+    elif provider == "pplx":
+        from openmark.embeddings.pplx import PplxEmbedder
+        return PplxEmbedder()
     else:
-        raise ValueError(f"Unknown EMBEDDING_PROVIDER: '{provider}'. Use 'local' or 'azure'.")
+        raise ValueError(f"Unknown EMBEDDING_PROVIDER: '{provider}'. Use 'local', 'azure', or 'pplx'.")

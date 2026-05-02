@@ -1,10 +1,10 @@
 """
-LangGraph ReAct agent for OpenMark.
-Uses Azure gpt-4o-mini as the LLM.
-Has access to all OpenMark tools (ChromaDB + Neo4j).
+LangGraph ReAct agent for OpenMark — Graph RAG edition.
+
+Primary LLM: Bonsai 1.7B via local llama-server (AGENT_PROVIDER=local)
+Fallback:    Azure gpt-5-mini (AGENT_PROVIDER=azure)
 """
 
-from langchain_openai import AzureChatOpenAI
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 from openmark import config
@@ -12,45 +12,77 @@ from openmark.agent.tools import ALL_TOOLS
 
 SYSTEM_PROMPT = """You are OpenMark — Ahmad's personal AI knowledge assistant.
 
-You have access to his entire curated knowledge base of 7,000+ saved bookmarks,
-LinkedIn posts, and YouTube videos — all categorized, tagged, and connected in a
-knowledge graph.
+You have access to his entire curated knowledge base of 8,831+ saved bookmarks,
+LinkedIn posts, and YouTube videos. All items are stored in a knowledge graph (Neo4j)
+with semantic embeddings (pplx-embed 1024-dim) and Louvain community structure.
+
+Sources: Edge browser (4,359) + Raindrop (2,094) + LinkedIn (1,260) + daily.dev (430) + YouTube (189)
 
 Your job:
 - Help Ahmad find exactly what he saved and can't remember
-- Discover connections between topics he didn't know existed
-- Answer questions by searching his real saved content (not your training data)
-- Be direct and useful — no filler
+- Surface hidden connections between topics via the knowledge graph
+- Answer by searching his real saved content — never make up resources
 
-When answering:
-- Always use tools to search first before responding
-- Show the actual URLs and titles from results
-- Group results by relevance
-- If one search doesn't find enough, try a different angle (by tag, by category, by similarity)
+Search strategy (in order):
+1. search_semantic — vector + graph search, use this first, always
+2. search_by_category — when the topic maps to a known category
+3. search_by_community — when you want to find everything in a topic cluster
+4. graph_expand — when you have a specific URL and want related items
+5. get_stats — to see what's available in the knowledge base
 
-Available search modes:
-- search_semantic: natural language search (most useful for general queries)
-- search_by_category: filter by topic category
-- find_by_tag: exact tag lookup in the knowledge graph
-- find_similar_bookmarks: find related content to a specific URL
-- explore_tag_cluster: discover what else connects to a topic
-- get_stats: see what's in the knowledge base
-- run_cypher: advanced graph queries (for power users)
+Rules:
+- Always call a search tool before answering
+- Show real URLs and titles from results
+- If one search angle fails, try a different one
+- Be direct, no filler
+
+Categories available: RAG & Vector Search, Agent Development, LangChain / LangGraph,
+MCP & Tool Use, Context Engineering, LLM Fine-tuning, AI Tools & Platforms,
+GitHub Repos & OSS, Learning & Courses, YouTube & Video, Web Development,
+Cloud & Infrastructure, Data Science & ML, Knowledge Graphs & Neo4j,
+Career & Jobs, Finance & Crypto, Design & UI/UX, News & Articles, Entertainment & Other
 """
 
 
-def build_agent():
-    llm = AzureChatOpenAI(
+def _build_azure_llm():
+    from langchain_openai import AzureChatOpenAI
+    return AzureChatOpenAI(
         azure_endpoint=config.AZURE_ENDPOINT,
         api_key=config.AZURE_API_KEY,
         azure_deployment=config.AZURE_DEPLOYMENT_LLM,
         api_version=config.AZURE_API_VERSION,
-        temperature=0,
         streaming=True,
     )
 
-    checkpointer = MemorySaver()
 
+def _build_local_llm():
+    from langchain_openai import ChatOpenAI
+    return ChatOpenAI(
+        base_url=config.BONSAI_URL,
+        api_key="none",
+        model=config.BONSAI_MODEL,
+        streaming=True,
+        # Qwen3 thinking tokens: disable for cleaner tool-use responses
+        model_kwargs={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+
+
+def build_agent():
+    provider = config.AGENT_PROVIDER.lower()
+
+    if provider == "local":
+        try:
+            llm = _build_local_llm()
+            print(f"Agent ready (local Bonsai @ {config.BONSAI_URL})")
+        except Exception as e:
+            print(f"Local agent failed ({e}), falling back to Azure")
+            llm = _build_azure_llm()
+            print(f"Agent ready ({config.AZURE_DEPLOYMENT_LLM} via Azure)")
+    else:
+        llm = _build_azure_llm()
+        print(f"Agent ready ({config.AZURE_DEPLOYMENT_LLM} via Azure)")
+
+    checkpointer = MemorySaver()
     agent = create_react_agent(
         model=llm,
         tools=ALL_TOOLS,
@@ -61,7 +93,6 @@ def build_agent():
 
 
 def ask(agent, question: str, thread_id: str = "default") -> str:
-    """Run a question through the agent and return the final text response."""
     config_run = {"configurable": {"thread_id": thread_id}}
     result = agent.invoke(
         {"messages": [{"role": "user", "content": question}]},

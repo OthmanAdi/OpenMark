@@ -1,14 +1,13 @@
 """
-LangGraph tools for the OpenMark agent.
-Each tool hits either ChromaDB (semantic) or Neo4j (graph) or both.
+LangGraph tools for the OpenMark Graph RAG agent.
+All search runs through Neo4j vector index + graph traversal.
+No ChromaDB — Neo4j only.
 """
 
 from langchain_core.tools import tool
 from openmark.embeddings.factory import get_embedder
-from openmark.stores import chroma as chroma_store
 from openmark.stores import neo4j_store
 
-# Embedder is loaded once and reused
 _embedder = None
 
 def _get_embedder():
@@ -18,111 +17,139 @@ def _get_embedder():
     return _embedder
 
 
+def _fmt(results: list[dict]) -> str:
+    if not results:
+        return "No results found."
+    lines = []
+    for i, r in enumerate(results, 1):
+        tags = ", ".join(r.get("tags") or []) or "—"
+        sim  = r.get("similarity", 0)
+        lines.append(
+            f"{i}. [{r.get('category', '')}] {r.get('title', '')}\n"
+            f"   {r.get('url', '')}\n"
+            f"   similarity: {sim:.3f}  source: {r.get('source', '')}  tags: {tags}"
+        )
+        similar = r.get("similar_urls") or []
+        if similar:
+            lines.append(f"   related: {' | '.join(similar[:2])}")
+    return "\n\n".join(lines)
+
+
 @tool
 def search_semantic(query: str, n: int = 10) -> str:
     """
-    Search bookmarks by semantic meaning using vector similarity.
-    Use this for natural language queries like 'RAG tools', 'LangGraph tutorials', etc.
-    Returns top N most relevant bookmarks.
+    Search bookmarks by semantic meaning using Neo4j vector index + graph context.
+    Returns titles, URLs, categories, tags, and related bookmarks.
+    Use this FIRST for any query.
     """
-    results = chroma_store.search(query, _get_embedder(), n=n)
-    if not results:
-        return "No results found."
-    lines = [f"{r['rank']}. [{r['category']}] {r['title']}\n   {r['url']} (similarity: {r['similarity']}, score: {r['score']})"
-             for r in results]
-    return "\n".join(lines)
+    try:
+        q_embed = _get_embedder().embed_query(query)
+        results = neo4j_store.vector_search(q_embed, n=n)
+        return _fmt(results)
+    except Exception as e:
+        return f"Search error: {e}"
 
 
 @tool
 def search_by_category(category: str, query: str = "", n: int = 15) -> str:
     """
-    Find bookmarks in a specific category, optionally filtered by semantic query.
+    Find bookmarks in a specific category, optionally narrowed by a query.
     Categories: RAG & Vector Search, Agent Development, LangChain / LangGraph,
-    MCP & Tool Use, Context Engineering, AI Tools & Platforms, GitHub Repos & OSS,
-    Learning & Courses, YouTube & Video, Web Development, Cloud & Infrastructure,
-    Data Science & ML, Knowledge Graphs & Neo4j, Career & Jobs, LLM Fine-tuning,
-    Finance & Crypto, Design & UI/UX, News & Articles, Entertainment & Other
+    MCP & Tool Use, Context Engineering, LLM Fine-tuning, AI Tools & Platforms,
+    GitHub Repos & OSS, Learning & Courses, YouTube & Video, Web Development,
+    Cloud & Infrastructure, Data Science & ML, Knowledge Graphs & Neo4j,
+    Career & Jobs, Finance & Crypto, Design & UI/UX, News & Articles, Entertainment & Other
     """
-    if query:
-        results = chroma_store.search(query, _get_embedder(), n=n, category=category)
-    else:
-        results = chroma_store.search(category, _get_embedder(), n=n, category=category)
-    if not results:
-        return f"No bookmarks found in category '{category}'."
-    lines = [f"{r['rank']}. {r['title']}\n   {r['url']}" for r in results]
-    return f"Category '{category}' — top results:\n" + "\n".join(lines)
+    try:
+        q_embed = _get_embedder().embed_query(query or category)
+        results = neo4j_store.vector_search(q_embed, n=n, category=category)
+        return f"Category '{category}':\n\n" + _fmt(results)
+    except Exception as e:
+        return f"Search error: {e}"
+
+
+@tool
+def graph_expand(url: str) -> str:
+    """
+    Expand a bookmark in the knowledge graph.
+    Returns its tags, similar bookmarks (SIMILAR_TO edges), and community members.
+    Use after finding an interesting bookmark to discover related content.
+    """
+    try:
+        return neo4j_store.graph_expand(url)
+    except Exception as e:
+        return f"Graph error: {e}"
+
+
+@tool
+def search_by_community(query: str, n: int = 20) -> str:
+    """
+    Find all bookmarks in the topic community closest to the query.
+    Uses Louvain graph clustering — surfaces a coherent topic cluster.
+    Great for discovering everything saved about a broad topic.
+    """
+    try:
+        q_embed = _get_embedder().embed_query(query)
+        results = neo4j_store.search_by_community(q_embed, n=n)
+        if not results:
+            return "No community found. Try search_semantic instead."
+        lines = [f"- [{r.get('category', '')}] {r.get('title', '')}\n  {r.get('url', '')}"
+                 for r in results]
+        return f"Topic community for '{query}' ({len(results)} items):\n\n" + "\n\n".join(lines)
+    except Exception as e:
+        return f"Community search error: {e}"
 
 
 @tool
 def find_by_tag(tag: str) -> str:
-    """
-    Find all bookmarks tagged with a specific tag using the knowledge graph.
-    Returns bookmarks ordered by quality score.
-    """
-    results = neo4j_store.find_by_tag(tag, limit=20)
-    if not results:
-        return f"No bookmarks found with tag '{tag}'."
-    lines = [f"- {r['title']}\n  {r['url']} (score: {r['score']})" for r in results]
-    return f"Bookmarks tagged '{tag}':\n" + "\n".join(lines)
-
-
-@tool
-def find_similar_bookmarks(url: str) -> str:
-    """
-    Find bookmarks semantically similar to a given URL.
-    Uses SIMILAR_TO edges in the knowledge graph (built from embedding neighbors).
-    """
-    results = neo4j_store.find_similar(url, limit=10)
-    if not results:
-        return f"No similar bookmarks found for {url}."
-    lines = [f"- {r['title']}\n  {r['url']} (similarity: {r['similarity']:.3f})" for r in results]
-    return "Similar bookmarks:\n" + "\n".join(lines)
+    """Find bookmarks tagged with a specific tag using the knowledge graph."""
+    try:
+        results = neo4j_store.find_by_tag(tag, limit=20)
+        if not results:
+            return f"No bookmarks tagged '{tag}'. Try search_semantic('{tag}')."
+        lines = [f"- {r['title']}\n  {r['url']}" for r in results]
+        return f"Tag '{tag}' — {len(results)} results:\n" + "\n".join(lines)
+    except Exception as e:
+        return f"Tag search error: {e}"
 
 
 @tool
 def explore_tag_cluster(tag: str) -> str:
-    """
-    Explore the knowledge graph around a tag — find related tags and their bookmarks.
-    Traverses CO_OCCURS_WITH edges (2 hops) to discover connected topics.
-    Great for discovering what else you know about a topic.
-    """
-    results = neo4j_store.find_tag_cluster(tag, hops=2, limit=25)
-    if not results:
-        return f"No cluster found for tag '{tag}'."
-    lines = [f"- [{r['via_tag']}] {r['title']}\n  {r['url']}" for r in results]
-    return f"Knowledge cluster around '{tag}':\n" + "\n".join(lines)
+    """Explore connected tags 2 hops away via CO_OCCURS_WITH edges."""
+    try:
+        results = neo4j_store.find_tag_cluster(tag, hops=2, limit=25)
+        if not results:
+            return f"No cluster for tag '{tag}'."
+        lines = [f"- [{r['via_tag']}] {r['title']}\n  {r['url']}" for r in results]
+        return f"Knowledge cluster around '{tag}':\n" + "\n".join(lines)
+    except Exception as e:
+        return f"Cluster search error: {e}"
 
 
 @tool
 def get_stats() -> str:
-    """
-    Get statistics about the OpenMark knowledge base.
-    Shows total bookmarks, tags, categories in both ChromaDB and Neo4j.
-    """
-    chroma_stats = chroma_store.get_stats()
-    neo4j_stats  = neo4j_store.get_stats()
-    return (
-        f"OpenMark Knowledge Base Stats:\n"
-        f"  ChromaDB vectors:   {chroma_stats.get('total', 0)}\n"
-        f"  Neo4j bookmarks:    {neo4j_stats.get('bookmarks', 0)}\n"
-        f"  Neo4j tags:         {neo4j_stats.get('tags', 0)}\n"
-        f"  Neo4j categories:   {neo4j_stats.get('categories', 0)}"
-    )
+    """Get statistics about the OpenMark knowledge base."""
+    try:
+        s = neo4j_store.get_stats()
+        return (
+            f"OpenMark Knowledge Base:\n"
+            f"  Bookmarks:   {s.get('bookmarks', 0):,}\n"
+            f"  Tags:        {s.get('tags', 0):,}\n"
+            f"  Categories:  {s.get('categories', 0)}\n"
+            f"  Communities: {s.get('communities', 0)}"
+        )
+    except Exception as e:
+        return f"Stats error: {e}"
 
 
 @tool
 def run_cypher(cypher: str) -> str:
-    """
-    Run a raw Cypher query against the Neo4j knowledge graph.
-    Use for advanced graph traversals. Example:
-    MATCH (b:Bookmark)-[:TAGGED]->(t:Tag) WHERE t.name='rag' RETURN b.title, b.url LIMIT 10
-    """
+    """Run a raw Cypher query against the Neo4j knowledge graph."""
     try:
         rows = neo4j_store.query(cypher)
         if not rows:
             return "Query returned no results."
-        lines = [str(r) for r in rows[:20]]
-        return "\n".join(lines)
+        return "\n".join(str(r) for r in rows[:20])
     except Exception as e:
         return f"Cypher error: {e}"
 
@@ -130,8 +157,9 @@ def run_cypher(cypher: str) -> str:
 ALL_TOOLS = [
     search_semantic,
     search_by_category,
+    graph_expand,
+    search_by_community,
     find_by_tag,
-    find_similar_bookmarks,
     explore_tag_cluster,
     get_stats,
     run_cypher,
