@@ -1,8 +1,64 @@
 # ── Credentials — NEVER commit ───────────────────────────────
 .env
 
-# ── Personal data — your bookmark vectors ────────────────────
+# ── Personal bookmark data ────────────────────────────────────
 data/chroma_db/
+data/edge_bookmarks.json
+data/design_categorized.json
+data/design_results.json
+data/teaching_ai_results.json
+data/*.json
+data/*.html
+
+# ── Local model files (too large for GitHub) ─────────────────
+models/
+
+# ── AI tool skill configs (machine-specific) ─────────────────
+skills/
+skills-lock.json
+.adal/
+.agents/
+.augment/
+.bob/
+.codebuddy/
+.commandcode/
+.continue/
+.cortex/
+.crush/
+.factory/
+.goose/
+.iflow/
+.junie/
+.kilocode/
+.kiro/
+.kode/
+.mcpjam/
+.mux/
+.neovate/
+.openhands/
+.pi/
+.pochi/
+.qoder/
+.qwen/
+.roo/
+.rovodev/
+.trae/
+.vibe/
+.windsurf/
+.zencoder/
+
+# ── Claude Code internal state ────────────────────────────────
+.claude/
+
+# ── MCP config (machine-specific paths) ──────────────────────
+.mcp.json
+
+# ── Session planning artifacts ────────────────────────────────
+findings.md
+progress.md
+task_plan.md
+ai_teaching_bookmarks.md
+nul
 
 # ── Python ────────────────────────────────────────────────────
 __pycache__/
@@ -35,17 +91,19 @@ Thumbs.db
 *.tmp
 *.bak
 
-# ── HuggingFace cache (large model files) ────────────────────
+# ── HuggingFace cache ─────────────────────────────────────────
 .cache/
 
-# ── Raw data exports — personal, not for the repo ────────────
+# ── Raw data exports ─────────────────────────────────────────
 raindrop-mission/
 data/linkedin_saved.json
 data/youtube_MASTER.json
 data/CATEGORIZED.json
 
-# Utility scripts (local only)
+# ── Utility / dev scripts ─────────────────────────────────────
 nsfw_*.py
 nsfw_*.json
 scan_nsfw.py
 _purge_now.py
+app.py
+space_readme.md

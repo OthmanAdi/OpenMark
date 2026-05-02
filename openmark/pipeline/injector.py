@@ -19,7 +19,6 @@ from urllib.parse import urlparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from openmark.pipeline.normalize import normalize_item, dedupe
-from openmark.pipeline.raindrop import _categorize_from_tags  # optional, fails gracefully
 
 
 # Domain → category heuristics for bare URLs

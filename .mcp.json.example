@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "openmark": {
+      "command": "python",
+      "args": ["-m", "openmark.mcp.server"],
+      "cwd": "/path/to/OpenMark"
+    }
+  }
+}
