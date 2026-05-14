@@ -57,6 +57,10 @@ skills-lock.json
 # ── Newsletter drafts (personal) ─────────────────────────────
 drafts/
 
+# ── Chat history (personal) ──────────────────────────────────
+data/*.db
+data/openmark_chat.db
+
 # ── MCP config (machine-specific paths) ──────────────────────
 .mcp.json
 

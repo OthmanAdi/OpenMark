@@ -14,6 +14,11 @@ import gradio as gr
 import json as _json
 import base64 as _b64
 from openmark import config
+from openmark import history as _history
+
+# Chat history DB — survives refresh, restart, and crashes. Persists every
+# message exactly as the user saw it.
+_history.init_db()
 
 print("Loading OpenMark...")
 
@@ -334,10 +339,13 @@ def _maybe_export_report(md: str, first_line_title: str = "") -> str:
     )
 
 
-def chat_fn(message: str, history: list, thread_id: str):
+def chat_fn(message: str, history: list, session_id: int | None):
     """
     Streaming generator for gr.ChatInterface.
-    Yields partial markdown as plan / tool events / final answer arrive.
+
+    Returns assistant markdown chunks AND persists the full exchange to SQLite
+    so the chat survives refresh / restart. The session_id state is created
+    lazily on first message of a fresh session.
     """
     if _agent is None:
         yield (
@@ -349,13 +357,24 @@ def chat_fn(message: str, history: list, thread_id: str):
 
     from openmark.agent.graph import ask_stream
 
+    # Ensure we have a session — create one on the first message.
+    if not session_id:
+        session_id = _history.create_session(title=_history.auto_title(message))
+    # Persist the user message NOW so a mid-stream refresh still shows it.
+    _history.append_message(session_id, "user", message)
+
+    # Thread the agent off the session id so MemorySaver groups turns correctly.
+    thread_id = f"sess-{session_id}"
+
     parts: list[str] = []
     thinking_text = ""        # batched fallback (only if per-turn didn't stream)
     n_calls = 0
     turn_counter = 0          # one inline thought bubble per AIMessage emitted
+    tool_events: list[dict] = []
+    per_turn_thinking: list[str] = []
 
     try:
-        for ev in ask_stream(_agent, message, thread_id=thread_id or "default"):
+        for ev in ask_stream(_agent, message, thread_id=thread_id):
             kind = ev.get("kind")
             if kind == "user":
                 continue
@@ -365,6 +384,7 @@ def chat_fn(message: str, history: list, thread_id: str):
                 turn_counter += 1
                 t = (ev.get("text", "") or "").strip()
                 if t:
+                    per_turn_thinking.append(t)
                     parts.append(
                         f"<details style='background:#0f172a;border-left:3px solid #a855f7;"
                         f"padding:6px 10px;margin:6px 0;border-radius:4px;font-size:0.85em'>"
@@ -378,6 +398,7 @@ def chat_fn(message: str, history: list, thread_id: str):
             elif kind == "tool_start":
                 parts.append(_tool_card({"phase": "start", "tool": ev["tool"], "args": ev.get("args", {})}))
                 n_calls += 1
+                tool_events.append({"phase": "start", "tool": ev["tool"], "args": ev.get("args", {})})
             elif kind == "tool_end":
                 parts.append(_tool_card({
                     "phase": "end",
@@ -386,12 +407,17 @@ def chat_fn(message: str, history: list, thread_id: str):
                     "duration_ms": ev.get("duration_ms"),
                     "result_preview": ev.get("preview", ""),
                 }))
+                tool_events.append({"phase": "end", "tool": ev["tool"],
+                                    "duration_ms": ev.get("duration_ms"),
+                                    "preview_len": len(ev.get("preview", "") or "")})
             elif kind == "tool_error":
                 parts.append(_tool_card({
                     "phase": "error",
                     "tool": ev.get("tool", "?"),
                     "error": ev.get("error", ""),
                 }))
+                tool_events.append({"phase": "error", "tool": ev.get("tool", "?"),
+                                    "error": ev.get("error", "")})
             elif kind == "thinking":
                 thinking_text = ev.get("text", "")
             elif kind == "final":
@@ -413,6 +439,21 @@ def chat_fn(message: str, history: list, thread_id: str):
     except Exception as e:
         parts.append(f"\n\n❌ **Agent error:** `{e}`")
         yield "\n".join(parts)
+    finally:
+        # Persist the assistant message exactly as the user saw it, plus the
+        # thinking trace and tool events for full replay fidelity.
+        try:
+            assistant_md = "\n".join(parts) if parts else "_(no response)_"
+            full_thinking = (
+                "\n\n---\n\n".join(per_turn_thinking)
+                if per_turn_thinking else thinking_text
+            )
+            _history.append_message(
+                session_id, "assistant", assistant_md,
+                thinking=full_thinking, tool_calls=tool_events,
+            )
+        except Exception as e:
+            print(f"[history] failed to persist assistant message: {e}")
 
 
 # ── Stats ─────────────────────────────────────────────────────────────────────
@@ -838,38 +879,82 @@ def build_ui():
                     for s in _skill_rows
                 ]
 
-                with gr.Accordion("Skills (click to prefill /command)", open=bool(_skill_rows)):
+                # Helpers for the history dropdown ------------------------------
+                def _session_choices() -> list[tuple[str, int]]:
+                    return [(_history.session_label(s), s["id"])
+                            for s in _history.list_sessions(limit=100)]
+
+                def _load_session(sid_choice: int | None):
+                    """Return chatbot messages list + the int session id, given a dropdown value."""
+                    if not sid_choice:
+                        return [], None
+                    try:
+                        sid = int(sid_choice)
+                    except (TypeError, ValueError):
+                        return [], None
+                    rows = _history.get_messages(sid)
+                    msgs = [{"role": r["role"], "content": r["content"]} for r in rows]
+                    return msgs, sid
+
+                def _new_chat():
+                    """Clear chatbot + session state. Refresh the dropdown."""
+                    return [], None, gr.update(choices=_session_choices(), value=None)
+
+                def _delete_chat(sid_choice):
+                    if not sid_choice:
+                        return [], None, gr.update(choices=_session_choices(), value=None)
+                    try:
+                        _history.delete_session(int(sid_choice))
+                    except Exception as e:
+                        print(f"[history] delete failed: {e}")
+                    return [], None, gr.update(choices=_session_choices(), value=None)
+
+                def _refresh_sessions():
+                    return gr.update(choices=_session_choices())
+
+                # State: int session id, lazily created on first message
+                session_id_state = gr.State(value=None)
+
+                # Top bar — history controls
+                with gr.Row():
+                    new_chat_btn = gr.Button("✨ New chat", variant="primary", scale=1, min_width=110)
+                    session_dd = gr.Dropdown(
+                        choices=_session_choices(),
+                        value=None,
+                        label="Previous chats (persisted)",
+                        info="Pick a past chat to reload it. SQLite-backed, survives refresh.",
+                        scale=5,
+                        interactive=True,
+                    )
+                    refresh_btn = gr.Button("↻", scale=0, min_width=40)
+                    delete_btn = gr.Button("🗑", variant="stop", scale=0, min_width=40)
+
+                with gr.Accordion("Skills (click to prefill /command)", open=False):
                     if _skill_rows:
                         skill_picker = gr.Radio(
                             choices=_skill_radio_choices,
                             label="",
                             value=None,
-                            info="Click a skill below to insert its slash command into the chat box. "
-                                 "Or just type / at the start of any message and the agent's "
-                                 "OpenMarkSkillMiddleware will suggest skills.",
+                            info="Click a skill to insert its slash command. "
+                                 "Or type / at the start of any message.",
                         )
                     else:
                         gr.HTML("<i style='color:#64748b'>No skills installed yet.</i>")
                         skill_picker = None
-
-                with gr.Accordion("Session controls", open=False):
-                    thread_input = gr.Textbox(
-                        value="default",
-                        label="Session ID",
-                        info="Change to start a fresh thread. Most of the time leave as 'default'.",
-                        scale=1,
-                    )
                     gr.HTML(
-                        "<div style='font-size:0.8em;color:#64748b;line-height:1.5'>"
-                        "<b>Slash commands:</b> type <code>/newsletter ...</code>, <code>/deep-research ...</code>, "
-                        "<code>/weekly-digest</code>, <code>/bookmark-dive &lt;URL&gt;</code>, <code>/fast-search ...</code>.<br>"
-                        "Or just ask in plain English — the agent has a load_skill tool and will pick a skill itself."
+                        "<div style='font-size:0.8em;color:#64748b;line-height:1.5;margin-top:6px'>"
+                        "<b>Slash commands:</b> <code>/newsletter</code>, <code>/newsletter-roundup</code>, "
+                        "<code>/newsletter-essay</code>, <code>/newsletter-comparison</code>, "
+                        "<code>/newsletter-thread</code>, <code>/deep-research</code>, "
+                        "<code>/weekly-digest</code>, <code>/bookmark-dive &lt;URL&gt;</code>, "
+                        "<code>/fast-search</code>.<br>"
+                        "Or just ask in plain English — the agent picks a skill itself."
                         "</div>"
                     )
 
                 chat_ui = gr.ChatInterface(
                     fn=chat_fn,
-                    additional_inputs=[thread_input],
+                    additional_inputs=[session_id_state],
                     chatbot=gr.Chatbot(
                         height=620,
                         placeholder=(
@@ -884,16 +969,13 @@ def build_ui():
                             "<i>/bookmark-dive https://...</i>"
                             "</div></div>"
                         ),
-                        # F.1 — render LaTeX inline ($...$) and display ($$...$$)
                         latex_delimiters=[
                             {"left": "$$", "right": "$$", "display": True},
                             {"left": "$",  "right": "$",  "display": False},
                             {"left": "\\(", "right": "\\)", "display": False},
                             {"left": "\\[", "right": "\\]", "display": True},
                         ],
-                        # F.2 — keep our HTML cards (details/div/sub) instead of sanitizing them away.
                         sanitize_html=False,
-                        # F.3 — emit standard markdown so tables/headers/code render natively
                         render_markdown=True,
                     ),
                     submit_btn="Send",
@@ -901,7 +983,43 @@ def build_ui():
                     fill_height=False,
                 )
 
-                # Wire skill-picker → chat textbox so a click prefills "/<skill> "
+                # Wire history controls — load / new / delete / refresh
+                session_dd.change(
+                    fn=_load_session,
+                    inputs=[session_dd],
+                    outputs=[chat_ui.chatbot, session_id_state],
+                    show_progress="hidden",
+                )
+                new_chat_btn.click(
+                    fn=_new_chat,
+                    inputs=None,
+                    outputs=[chat_ui.chatbot, session_id_state, session_dd],
+                    show_progress="hidden",
+                )
+                delete_btn.click(
+                    fn=_delete_chat,
+                    inputs=[session_dd],
+                    outputs=[chat_ui.chatbot, session_id_state, session_dd],
+                    show_progress="hidden",
+                )
+                refresh_btn.click(
+                    fn=_refresh_sessions,
+                    inputs=None,
+                    outputs=[session_dd],
+                    show_progress="hidden",
+                )
+
+                # After every assistant reply, refresh the dropdown so the
+                # (auto-titled) current chat moves to the top of the list.
+                # chat_ui exposes .chatbot for change events.
+                chat_ui.chatbot.change(
+                    fn=_refresh_sessions,
+                    inputs=None,
+                    outputs=[session_dd],
+                    show_progress="hidden",
+                )
+
+                # Skill-picker prefills the chat textbox.
                 if skill_picker is not None:
                     skill_picker.change(
                         fn=lambda v: v or "",
