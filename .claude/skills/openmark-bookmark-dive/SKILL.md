@@ -24,19 +24,19 @@ If the user gives no URL, fall back to openmark-fast-search. If the user gives a
 ## Tool sequence
 
 1. **Confirm the bookmark exists**:
-   - `mcp__openmark__get_bookmark_full(url=<URL>)`
+   - `get_bookmark_full(url=<URL>)`
    - If `note == "Bookmark not found."`, say so and stop. Don't pretend.
 
 2. **Graph expand** (this is the core call):
-   - `mcp__openmark__graph_expand(url=<URL>)` — returns text describing tags, SIMILAR_TO list, community peers.
+   - `graph_expand(url=<URL>)` — returns text describing tags, SIMILAR_TO list, community peers.
 
 3. **WebFetch the URL itself** (parallel to step 2 if possible):
    - `WebFetch(url=<URL>, prompt="Summarize in 3-4 sentences. Then list 2-3 specific claims or numbers that are central to the page.")`
    - If fetch fails (paywall, JS-only, 404), skip and note "Could not fetch live page."
 
 4. **Optional broaden — only if user explicitly asks "what else"**:
-   - For top 2 tags from get_bookmark_full's `tags[]`, run `mcp__openmark__find_by_tag(tag=<tag>, n=10)`.
-   - For the `community_id` if present, run `mcp__openmark__search_by_community(query=<title or first tag>, n=15)`.
+   - For top 2 tags from get_bookmark_full's `tags[]`, run `find_by_tag(tag=<tag>, n=10)`.
+   - For the `community_id` if present, run `search_by_community(query=<title or first tag>, n=15)`.
 
 ## Output format
 

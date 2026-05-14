@@ -11,7 +11,7 @@ Single-shot search over Ahmad's personal knowledge graph. Optimised for "I just 
 
 ## The recipe (in this exact order)
 
-1. **One call**: `mcp__openmark__search_semantic(query=<user query>, n=12)`.
+1. **One call**: `search_semantic(query=<user query>, n=12)`.
 2. Inspect the returned `hits[]`. Each hit has `url`, `title`, `similarity`, `category`, `source`, `tags`, `community_id`.
 3. **No second tool call unless** you see one of these failure signals:
    - `total_found == 0` → fall back to `find_by_tag` if the query looks like a single token, else `search_by_category` if you can map it to a canonical category.
@@ -42,7 +42,7 @@ Don't apologise. Don't recommend WebFetch — that's deep-research territory.
 
 User: *"find my bookmarks on prompt caching"*
 
-1. `mcp__openmark__search_semantic(query="prompt caching", n=12)` → 12 hits.
+1. `search_semantic(query="prompt caching", n=12)` → 12 hits.
 2. Render:
 
 ```

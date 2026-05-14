@@ -7,6 +7,7 @@ validate citations against state["seen_urls"].
 """
 
 import re
+from datetime import datetime, timedelta, timezone
 from langchain_core.tools import tool
 from openmark.embeddings.factory import get_embedder
 from openmark.stores import neo4j_store
@@ -246,6 +247,149 @@ def search_youtube(query: str, n: int = 15) -> str:
         return find_by_source.invoke({"source": "youtube_liked_videos", "query": query, "n": n})
 
 
+# ── Time-aware tools (depend on graph_hygiene backfilling created_at) ─────────
+
+@tool
+def find_recent(days: int = 7, query: str = "", n: int = 25) -> str:
+    """
+    Bookmarks added in the last N days. Currently only LinkedIn nodes have
+    reliable timestamps (decoded from activity URN); Edge/Raindrop/YouTube
+    need their own created_at backfill before they show up.
+    Optional query semantically ranks within the time window.
+    """
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        if query.strip():
+            q_embed = _get_embedder().embed_query(query)
+            rows = neo4j_store.query("""
+                MATCH (b)
+                  SEARCH b IN (
+                    VECTOR INDEX bookmark_embedding
+                    FOR $embedding
+                    LIMIT 200
+                  ) SCORE AS score
+                WHERE b.created_at IS NOT NULL AND b.created_at >= datetime($cutoff)
+                OPTIONAL MATCH (b)-[:TAGGED]->(t:Tag)
+                RETURN b.url AS url, b.title AS title, b.score AS bm_score,
+                       b.source AS source, b.category AS category,
+                       score AS similarity, collect(t.name)[..6] AS tags
+                ORDER BY similarity DESC LIMIT $n
+            """, {"embedding": q_embed, "cutoff": cutoff, "n": n})
+        else:
+            rows = neo4j_store.query("""
+                MATCH (b:Bookmark)
+                WHERE b.created_at IS NOT NULL AND b.created_at >= datetime($cutoff)
+                OPTIONAL MATCH (b)-[:TAGGED]->(t:Tag)
+                RETURN b.url AS url, b.title AS title, b.score AS bm_score,
+                       b.source AS source, b.category AS category,
+                       collect(t.name)[..6] AS tags
+                ORDER BY b.created_at DESC LIMIT $n
+            """, {"cutoff": cutoff, "n": n})
+        hits = [_row_to_hit(r) for r in rows]
+        note = ("Only LinkedIn nodes have timestamps. Edge / Raindrop / YouTube "
+                "need backfill before they appear here.") if not hits else ""
+        return ToolResult(
+            hits=hits, strategy="source",
+            query_echo=f"last {days}d :: {query}",
+            total_found=len(hits), note=note,
+        ).to_compact_markdown()
+    except Exception as e:
+        return ToolResult(strategy="source", query_echo=f"last {days}d", note=f"ERROR: {e}").to_compact_markdown()
+
+
+@tool
+def search_by_date_range(from_iso: str, to_iso: str, query: str = "", n: int = 30) -> str:
+    """
+    Bookmarks created between two ISO timestamps. Examples:
+      from_iso='2026-05-01', to_iso='2026-05-14'.
+    Optional query semantically ranks within the window.
+    """
+    try:
+        if query.strip():
+            q_embed = _get_embedder().embed_query(query)
+            rows = neo4j_store.query("""
+                MATCH (b)
+                  SEARCH b IN (
+                    VECTOR INDEX bookmark_embedding
+                    FOR $embedding
+                    LIMIT 300
+                  ) SCORE AS score
+                WHERE b.created_at IS NOT NULL
+                  AND b.created_at >= datetime($from_iso)
+                  AND b.created_at <  datetime($to_iso)
+                OPTIONAL MATCH (b)-[:TAGGED]->(t:Tag)
+                RETURN b.url AS url, b.title AS title, b.score AS bm_score,
+                       b.source AS source, b.category AS category,
+                       score AS similarity, collect(t.name)[..6] AS tags
+                ORDER BY similarity DESC LIMIT $n
+            """, {"embedding": q_embed, "from_iso": from_iso, "to_iso": to_iso, "n": n})
+        else:
+            rows = neo4j_store.query("""
+                MATCH (b:Bookmark)
+                WHERE b.created_at IS NOT NULL
+                  AND b.created_at >= datetime($from_iso)
+                  AND b.created_at <  datetime($to_iso)
+                OPTIONAL MATCH (b)-[:TAGGED]->(t:Tag)
+                RETURN b.url AS url, b.title AS title, b.score AS bm_score,
+                       b.source AS source, b.category AS category,
+                       collect(t.name)[..6] AS tags
+                ORDER BY b.created_at DESC LIMIT $n
+            """, {"from_iso": from_iso, "to_iso": to_iso, "n": n})
+        hits = [_row_to_hit(r) for r in rows]
+        return ToolResult(
+            hits=hits, strategy="source",
+            query_echo=f"{from_iso}..{to_iso} :: {query}",
+            total_found=len(hits),
+        ).to_compact_markdown()
+    except Exception as e:
+        return ToolResult(strategy="source", query_echo=f"{from_iso}..{to_iso}", note=f"ERROR: {e}").to_compact_markdown()
+
+
+@tool
+def get_bookmark_full(url: str) -> str:
+    """
+    Full record for one bookmark: title, category, tags, source, score,
+    created_at, SIMILAR_TO neighbors (titles + urls), community peers.
+    Use for newsletter context-building after you picked which bookmarks to feature.
+    """
+    try:
+        rows = neo4j_store.query("""
+            MATCH (b:Bookmark {url: $url})
+            OPTIONAL MATCH (b)-[:TAGGED]->(t:Tag)
+            OPTIONAL MATCH (b)-[:SIMILAR_TO]->(s:Bookmark)
+            OPTIONAL MATCH (b)-[:IN_COMMUNITY]->(c:Community)<-[:IN_COMMUNITY]-(peer:Bookmark)
+            WHERE peer.url <> $url
+            RETURN b.url AS url, b.title AS title, b.category AS category,
+                   b.source AS source, b.score AS score,
+                   b.created_at AS created_at,
+                   collect(DISTINCT t.name)                                AS tags,
+                   collect(DISTINCT {url: s.url, title: s.title})[..6]     AS similar,
+                   collect(DISTINCT peer.title)[..6]                       AS community_peers
+        """, {"url": url})
+        if not rows:
+            return f"[strategy=detail] Bookmark not found: {url}"
+        r = rows[0]
+        lines = [
+            f"[strategy=detail] {r.get('title','(no title)')}",
+            f"  URL:        {r.get('url')}",
+            f"  Source:     {r.get('source','—')}",
+            f"  Category:   {r.get('category','—')}",
+            f"  Score:      {r.get('score',0)}",
+            f"  Created:    {r.get('created_at','—')}",
+            f"  Tags:       {', '.join(r.get('tags') or []) or '—'}",
+            f"  SIMILAR_TO ({len(r.get('similar') or [])}):",
+        ]
+        for s in (r.get("similar") or [])[:6]:
+            lines.append(f"    - {s.get('title','')} — {s.get('url','')}")
+        if r.get("community_peers"):
+            lines.append(f"  Community peers ({len(r['community_peers'])}):")
+            for p in r["community_peers"][:6]:
+                lines.append(f"    - {p}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"[strategy=detail] ERROR: {e}"
+
+
 # ── Stats + raw Cypher (read-only) ─────────────────────────────────────────────
 
 @tool
@@ -299,6 +443,9 @@ ALL_TOOLS = [
     find_by_source,
     search_linkedin,
     search_youtube,
+    find_recent,
+    search_by_date_range,
+    get_bookmark_full,
     get_stats,
     run_cypher,
 ]

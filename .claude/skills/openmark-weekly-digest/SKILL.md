@@ -23,8 +23,8 @@ Digest is private notes. Newsletter is a publishable post.
 ## Tool sequence
 
 1. **Get window.** Default: last 7 days. Ahmad can override ("last 30 days", "since yesterday", "this month").
-2. **Pull recent:** `mcp__openmark__find_recent(days=N, n=40)` — empty query, just get everything fresh.
-3. **If thin (< 10 results):** the time filter only matches nodes with `created_at` set, which today is only LinkedIn. Fall back to `mcp__openmark__find_by_source(source="linkedin", n=30)` and warn Ahmad: "Only LinkedIn nodes have timestamps. Edge/Raindrop/YouTube need backfill before they show up in time queries."
+2. **Pull recent:** `find_recent(days=N, n=40)` — empty query, just get everything fresh.
+3. **If thin (< 10 results):** the time filter only matches nodes with `created_at` set, which today is only LinkedIn. Fall back to `find_by_source(source="linkedin", n=30)` and warn Ahmad: "Only LinkedIn nodes have timestamps. Edge/Raindrop/YouTube need backfill before they show up in time queries."
 4. **Cluster.** Read the categories of returned hits. Group into 3–6 topical buckets by category + tag overlap. Examples:
    - "Agent frameworks" (LangChain, LangGraph, Agent Development)
    - "RAG patterns" (RAG & Vector Search)

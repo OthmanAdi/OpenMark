@@ -60,12 +60,12 @@ If he didn't specify, ASK once: "What's the angle? And are we pulling from the l
 
 For topic T and window W:
 
-- `mcp__openmark__search_semantic(query=T, n=20)` — the core net
+- `search_semantic(query=T, n=20)` — the core net
 - ONE of (pick smartest):
-  - `mcp__openmark__search_by_community(query=T, n=15)` — cluster view, broad topic
-  - `mcp__openmark__search_by_category(category=<canonical>, query=T, n=15)` — if T maps to a category
-- `mcp__openmark__find_recent(days=W, query=T, n=15)` — fresh saves filter (only works for LinkedIn nodes today; the call is cheap, run it anyway)
-- `mcp__openmark__search_linkedin(query=T, n=10)` — LinkedIn has takes; takes make newsletters interesting
+  - `search_by_community(query=T, n=15)` — cluster view, broad topic
+  - `search_by_category(category=<canonical>, query=T, n=15)` — if T maps to a category
+- `find_recent(days=W, query=T, n=15)` — fresh saves filter (only works for LinkedIn nodes today; the call is cheap, run it anyway)
+- `search_linkedin(query=T, n=10)` — LinkedIn has takes; takes make newsletters interesting
 
 ### 3. Pick 8–12 anchor bookmarks
 

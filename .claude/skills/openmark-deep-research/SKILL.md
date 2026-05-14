@@ -27,13 +27,13 @@ Mark each todo `in_progress` when you start, `completed` when done. The user see
 
 Send these tool calls IN A SINGLE MESSAGE so they execute in parallel:
 
-- `mcp__openmark__search_semantic(query=<user query>, n=15)` — always
+- `search_semantic(query=<user query>, n=15)` — always
 - ONE of:
-  - `mcp__openmark__search_by_category(category=<inferred>, query=<user query>, n=10)` if the query maps cleanly to one canonical category
-  - `mcp__openmark__find_by_tag(tag=<core noun>, n=20)` if the query is a single concrete term
-  - `mcp__openmark__search_by_community(query=<user query>, n=20)` if the user wants "everything about" a topic
-- `mcp__openmark__find_by_source(source="linkedin", query=<user query>, n=8)` IF the query is about discourse/opinion/people — LinkedIn has the takes
-- `mcp__openmark__search_youtube(query=<user query>, n=8)` IF query is about tutorials/talks/courses
+  - `search_by_category(category=<inferred>, query=<user query>, n=10)` if the query maps cleanly to one canonical category
+  - `find_by_tag(tag=<core noun>, n=20)` if the query is a single concrete term
+  - `search_by_community(query=<user query>, n=20)` if the user wants "everything about" a topic
+- `find_by_source(source="linkedin", query=<user query>, n=8)` IF the query is about discourse/opinion/people — LinkedIn has the takes
+- `search_youtube(query=<user query>, n=8)` IF query is about tutorials/talks/courses
 
 Don't run all five. Pick 2–3 angles based on query shape. The point is variety, not volume.
 
@@ -51,7 +51,7 @@ Take the top 8 distinct URLs.
 
 For the top 3 distinct URLs that have `community_id` set or that look like "anchor" pages (high similarity, broad title):
 
-- `mcp__openmark__graph_expand(url=<that url>)` — gets SIMILAR_TO neighbors + community peers
+- `graph_expand(url=<that url>)` — gets SIMILAR_TO neighbors + community peers
 
 Add any new URLs from these expansions to a "neighbor pool". Don't fetch them yet.
 

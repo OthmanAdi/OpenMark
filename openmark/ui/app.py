@@ -316,13 +316,64 @@ def _render_report(r) -> str:
     return "\n".join(out)
 
 
+DRAFTS_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "drafts")
+)
+os.makedirs(DRAFTS_DIR, exist_ok=True)
+
+
+def _slugify(s: str, n: int = 50) -> str:
+    """Lowercase, alphanumeric + hyphen only, capped at n chars."""
+    import re as _re
+    s = _re.sub(r"[^a-zA-Z0-9]+", "-", (s or "").lower()).strip("-")
+    return (s or "report")[:n]
+
+
+def _save_report_to_drafts(report, markdown: str) -> str:
+    """Write the rendered report to drafts/ and return the file path."""
+    import time as _time
+    ts = _time.strftime("%Y-%m-%d-%H%M")
+    slug = _slugify(getattr(report, "title", "report") or "report", 40)
+    fname = f"{ts}-{slug}.md"
+    path = os.path.join(DRAFTS_DIR, fname)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(markdown)
+        return path
+    except Exception as e:
+        print(f"[drafts] failed to save report: {e}")
+        return ""
+
+
 def _render_structured(s) -> str:
-    """Dispatch on the structured_response Pydantic class."""
+    """Dispatch on the structured_response Pydantic class. Reports auto-export."""
     cls = type(s).__name__
     if cls == "QuickAnswer":
         return _render_quick(s)
     if cls == "Report":
-        return _render_report(s)
+        body = _render_report(s)
+        # Auto-export: drop the Report markdown into drafts/ so the user can
+        # download or re-open it. Gradio serves this via /gradio_api/file=...
+        # because we add DRAFTS_DIR to allowed_paths on launch.
+        path = _save_report_to_drafts(s, body)
+        if path:
+            # Forward-slash path is what gradio's /file= endpoint expects.
+            url_path = path.replace("\\", "/")
+            fname = os.path.basename(path)
+            body += (
+                f"\n\n---\n\n"
+                f"<div style='background:#0f172a;border:1px solid #1e293b;"
+                f"border-radius:8px;padding:10px 14px;margin-top:10px;font-family:sans-serif'>"
+                f"<span style='color:#94a3b8;font-size:0.85em'>📥 Saved to </span>"
+                f"<code style='background:#1e293b;color:#a5b4fc;padding:2px 6px;"
+                f"border-radius:4px;font-size:0.85em'>drafts/{fname}</code>"
+                f" &nbsp;·&nbsp; "
+                f"<a href='/gradio_api/file={url_path}' target='_blank' "
+                f"style='color:#7dd3fc;text-decoration:none;font-weight:600'>"
+                f"⬇ Download Markdown</a>"
+                f"</div>"
+            )
+        return body
     # Unknown — render fields
     try:
         return f"```json\n{s.model_dump_json(indent=2)}\n```"
@@ -346,14 +397,31 @@ def chat_fn(message: str, history: list, thread_id: str):
     from openmark.agent.graph import ask_stream
 
     parts: list[str] = []
-    thinking_text = ""
+    thinking_text = ""        # batched fallback (only if per-turn didn't stream)
     n_calls = 0
+    turn_counter = 0          # one inline thought bubble per AIMessage emitted
 
     try:
         for ev in ask_stream(_agent, message, thread_id=thread_id or "default"):
             kind = ev.get("kind")
             if kind == "user":
                 continue
+            elif kind == "turn_thinking":
+                # Per-turn reasoning lands BEFORE the tool calls for that turn.
+                # Render as a collapsed bubble so the chat stays scannable.
+                turn_counter += 1
+                t = (ev.get("text", "") or "").strip()
+                if t:
+                    parts.append(
+                        f"<details style='background:#0f172a;border-left:3px solid #a855f7;"
+                        f"padding:6px 10px;margin:6px 0;border-radius:4px;font-size:0.85em'>"
+                        f"<summary style='color:#c4b5fd;cursor:pointer'>"
+                        f"🧠 Thinking · turn {turn_counter} · {len(t):,} chars</summary>"
+                        f"<pre style='white-space:pre-wrap;background:#0b1220;padding:6px 8px;"
+                        f"border-radius:4px;max-height:340px;overflow:auto;color:#cbd5e1;"
+                        f"margin-top:4px;font-size:0.92em;line-height:1.45'>{_esc(t)}</pre>"
+                        f"</details>"
+                    )
             elif kind == "tool_start":
                 parts.append(_tool_card({"phase": "start", "tool": ev["tool"], "args": ev.get("args", {})}))
                 n_calls += 1
@@ -380,9 +448,12 @@ def chat_fn(message: str, history: list, thread_id: str):
                     final = _render_structured(structured)
                 else:
                     final = ev.get("text", "") or "_(no response)_"
+                # Fallback: only show batched thinking if per-turn didn't stream
+                # (graph.py guarantees this by suppressing the final yield in that case,
+                # so usually thinking_text is empty here).
                 if thinking_text:
                     parts.append(
-                        "<details><summary>🧠 <b>Thinking</b> · "
+                        "<details><summary>🧠 <b>Thinking (full trace)</b> · "
                         f"{n_calls} tool call(s) · codex 5.3 reasoning=high</summary>\n\n"
                         f"```\n{thinking_text}\n```\n\n</details>"
                     )
@@ -1021,4 +1092,7 @@ if __name__ == "__main__":
         inbrowser=True,
         theme=gr.themes.Base(primary_hue="indigo", neutral_hue="slate"),
         css=DARK_CSS,
+        # Allow Gradio to serve files from drafts/ so the auto-saved reports
+        # are downloadable via /gradio_api/file=drafts/*.md links.
+        allowed_paths=[DRAFTS_DIR],
     )

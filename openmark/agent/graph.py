@@ -326,6 +326,8 @@ def ask_stream(agent, question: str, thread_id: str = "default"):
 
     cfg = {"configurable": {"thread_id": thread_id}}
     chunk_count = 0
+    seen_msg_ids: set = set()
+    streamed_turn_thinking = False
 
     try:
         for chunk in agent.stream(
@@ -335,6 +337,26 @@ def ask_stream(agent, question: str, thread_id: str = "default"):
         ):
             chunk_count += 1
             log.info(f"[stream] chunk #{chunk_count} nodes={list((chunk or {}).keys())}")
+
+            # Surface per-turn reasoning the moment a new AIMessage lands.
+            # gpt-5.3-codex with summary=detailed stashes reasoning as content
+            # blocks of type="reasoning" inside AIMessage.content.
+            for node_name, node_state in (chunk or {}).items():
+                if not isinstance(node_state, dict):
+                    continue
+                for m in (node_state.get("messages", []) or []):
+                    mid = getattr(m, "id", None) or id(m)
+                    if mid in seen_msg_ids:
+                        continue
+                    seen_msg_ids.add(mid)
+                    if getattr(m, "type", "") != "ai":
+                        continue
+                    t = _extract_thinking([m])
+                    if t:
+                        log.info(f"[turn_thinking] node={node_name} chars={len(t)}")
+                        streamed_turn_thinking = True
+                        yield {"kind": "turn_thinking", "text": t}
+
             # Flush tool events that landed during this update.
             for ev in drain_events(thread_id):
                 phase = ev.get("phase")
@@ -386,9 +408,11 @@ def ask_stream(agent, question: str, thread_id: str = "default"):
     thinking = _extract_thinking(final_messages)
     n_calls = _count_tool_calls(final_messages)
     log.info(f"[ask_stream] DONE n_calls={n_calls} thinking_chars={len(thinking)} "
-             f"answer_chars={len(final_text)}")
+             f"answer_chars={len(final_text)} streamed_turn_thinking={streamed_turn_thinking}")
 
-    if thinking:
+    # Only emit the batched thinking trace if we DIDN'T stream per-turn thinking
+    # (else the UI would show the same reasoning twice — inline + final).
+    if thinking and not streamed_turn_thinking:
         yield {"kind": "thinking", "text": thinking}
     yield {"kind": "final",
            "text": final_text,
