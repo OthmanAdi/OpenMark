@@ -69,3 +69,87 @@ class Answer(BaseModel):
     )
     confidence: Literal["high", "medium", "low"] = "medium"
     suggested_followups: list[str] = Field(default_factory=list)
+
+
+# ── Two-mode response_format ──────────────────────────────────────────────────
+# The agent picks one based on user intent. LangChain's ToolStrategy(Union[...])
+# validates the chosen shape and stores it on state["structured_response"].
+
+class QuickAnswerHit(BaseModel):
+    """A single cited bookmark for a quick answer. URL must come from a tool result."""
+    title: str
+    url: str
+    why: str = Field(default="", description="One short phrase. Max 12 words. May be empty.")
+
+
+class QuickAnswer(BaseModel):
+    """
+    Use this for short, single-fact, or one-shot lookup questions.
+
+    Triggers: 'find my X', 'what did I save about Y', 'do I have Z',
+              fast-search slash, single-URL dive lookups.
+
+    Format: one tight summary (1-3 sentences) + up to 8 cited hits.
+    """
+    summary: str = Field(description="1-3 sentences. No preamble. No 'I found...'.")
+    hits: list[QuickAnswerHit] = Field(
+        default_factory=list,
+        description="Up to 8 bookmarks the user should look at, ranked by relevance.",
+    )
+
+
+class ReportSection(BaseModel):
+    """One section of a long-form report."""
+    heading: str = Field(description="Section title. Headline-style, no punctuation at end.")
+    body_markdown: str = Field(
+        description=(
+            "Section body as markdown. May include sub-headings, bullet lists, "
+            "inline code, bold/italic, and inline links to OpenMark URLs. "
+            "Cite URLs inline as [descriptive phrase](url)."
+        ),
+    )
+
+
+class ReportTable(BaseModel):
+    """An optional comparison table to render inside the report."""
+    caption: str = Field(default="", description="One-line table caption (optional).")
+    headers: list[str] = Field(description="Column headers in order.")
+    rows: list[list[str]] = Field(
+        description="Row values aligned to headers. Each row's length must equal headers length.",
+    )
+
+
+class Report(BaseModel):
+    """
+    Use this for research, comparison, newsletter material, weekly digest,
+    landscape overviews, anything multi-faceted or requiring sections.
+
+    Triggers: 'research X', 'compose newsletter', 'compare A vs B', 'what's
+              the landscape of...', 'weekly digest', 'deep dive'.
+
+    Format: title + tldr + 3-6 sections + optional table + flat citations list.
+    """
+    title: str = Field(description="Punchy, specific title. Max 9 words.")
+    tldr: str = Field(description="2-3 sentence headline finding. The user's takeaway.")
+    sections: list[ReportSection] = Field(
+        description="3-6 sections covering the question from different angles.",
+    )
+    table: ReportTable | None = Field(
+        default=None,
+        description=(
+            "Optional comparison or summary table. ONLY include when the content "
+            "genuinely benefits from tabular layout (e.g. comparing tools, "
+            "side-by-side feature sets, ranked lists with multiple columns)."
+        ),
+    )
+    citations: list[Citation] = Field(
+        description=(
+            "Every URL referenced in sections above. Flat list, in order of first "
+            "mention. URLs MUST appear in a tool result during this turn."
+        ),
+    )
+    confidence: Literal["high", "medium", "low"] = Field(default="medium")
+    suggested_followups: list[str] = Field(
+        default_factory=list,
+        description="0-3 concrete follow-up questions the user could ask next.",
+    )

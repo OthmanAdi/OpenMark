@@ -16,11 +16,14 @@ The 12 tools (typed Pydantic returns) cover:
 Memory: MemorySaver checkpointer keyed by thread_id.
 """
 
-from typing import Any
+import time
+from typing import Any, Union
 from langchain.agents import create_agent
+from langchain.agents.structured_output import ToolStrategy
 from langchain.agents.middleware import (
     AgentState,
     ModelCallLimitMiddleware,
+    SummarizationMiddleware,
     TodoListMiddleware,
     ToolRetryMiddleware,
     before_model,
@@ -31,6 +34,14 @@ from langgraph.checkpoint.memory import MemorySaver
 from openmark import config
 from openmark.agent.llms import build_executor, build_classifier
 from openmark.agent.tools import ALL_TOOLS
+from openmark.agent.schemas import QuickAnswer, Report
+from openmark.agent.middleware import (
+    OpenMarkSkillMiddleware,
+    slash_skill_loader,
+    tool_event_middleware,
+    drain_events,
+    log,
+)
 
 
 # ── Lazy classifier ───────────────────────────────────────────────────────────
@@ -124,16 +135,19 @@ def inject_live_stats(state: AgentState, runtime: Any) -> dict | None:
     mode = "fast"
     try:
         if last_user_text.strip():
+            t0 = time.time()
             cls_resp = _get_classifier().invoke(CLASSIFIER_PROMPT.format(query=last_user_text.strip()))
-            raw = (cls_resp.content if hasattr(cls_resp, "content") else str(cls_resp)).strip().lower()
+            raw = (cls_resp.content if hasattr(cls_resp, "content") else str(cls_resp))
             if isinstance(raw, list):
                 raw = " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in raw)
+            raw = str(raw).strip().lower()
             for cand in ("newsletter", "digest", "deep", "dive", "fast"):
                 if cand in raw:
                     mode = cand
                     break
+            log.info(f"[classifier] mode={mode} (raw={raw[:60]!r}) in {round((time.time()-t0)*1000,1)}ms")
     except Exception as e:
-        print(f"[classifier] failed: {e}; defaulting mode=fast")
+        log.info(f"[classifier] failed: {e}; defaulting mode=fast")
 
     try:
         from openmark.stores import neo4j_store
@@ -171,18 +185,47 @@ def build_agent():
     llm = build_executor()
     print(f"Agent LLM: {config.AZURE_DEPLOYMENT_EXECUTOR} (Responses API, reasoning={config.AZURE_REASONING_EXECUTOR}, summary=detailed)")
 
+    # Cheap model for SummarizationMiddleware — same gpt-5-mini we already build for the classifier.
+    summarizer_llm = build_classifier()
+
     agent = create_agent(
         model=llm,
         tools=ALL_TOOLS,
+        # Two-mode structured output. The agent picks QuickAnswer for short lookups,
+        # Report for research/newsletter/comparison/digest output. Validated against
+        # the Pydantic schemas — stored on state["structured_response"].
+        response_format=ToolStrategy(Union[QuickAnswer, Report]),
         # System prompt is dynamic via @before_model — pass minimal here.
         system_prompt=SYSTEM_PROMPT_TEMPLATE.format(
             bookmarks=11000, tags=5000, categories=19, communities=0,
         ),
         middleware=[
+            # 1. Slash-command pre-loader: if user typed `/<skill>`, eager-inject the
+            #    SKILL.md body as a SystemMessage and strip the slash from their query.
+            slash_skill_loader,
+            # 2. Skill catalogue (progressive disclosure) — registers `load_skill` tool
+            #    and appends the skill list to every system prompt so the agent can
+            #    self-select recipes when the user didn't use a slash command.
+            OpenMarkSkillMiddleware(),
+            # 3. Live KB stats + classifier mode hint.
             inject_live_stats,
+            # 4. Built-in planner — the agent writes its own todo list as the first action.
             TodoListMiddleware(),
+            # 5. Auto-compaction: once history crosses 8k tokens or 30 messages,
+            #    summarize older turns via gpt-5-mini, keep the most recent 12.
+            #    Prevents "thread limit exceeded" from accumulating across turns.
+            SummarizationMiddleware(
+                model=summarizer_llm,
+                trigger=[("tokens", 8000), ("messages", 30)],
+                keep=("messages", 12),
+            ),
+            # 6. Resilient against transient Neo4j hiccups.
             ToolRetryMiddleware(max_retries=2),
-            ModelCallLimitMiddleware(thread_limit=20, run_limit=15),
+            # 7. Capture tool events so the UI can render them live as cards.
+            tool_event_middleware,
+            # 8. Hard ceiling against runaway loops PER TURN ONLY.
+            #    No thread_limit — let SummarizationMiddleware handle long chats.
+            ModelCallLimitMiddleware(run_limit=15),
         ],
         checkpointer=MemorySaver(),
     )
@@ -194,10 +237,12 @@ def build_agent():
 def _extract_thinking(messages: list) -> str:
     """Pull reasoning summaries out of AIMessage.additional_kwargs / content_blocks."""
     out = []
+    found_keys = []
     for m in messages:
-        if not hasattr(m, "additional_kwargs"):
-            continue
-        ak = m.additional_kwargs or {}
+        mtype = getattr(m, "type", "?")
+        ak = getattr(m, "additional_kwargs", {}) or {}
+        if ak:
+            found_keys.append(f"{mtype}:{list(ak.keys())}")
         reasoning = ak.get("reasoning")
         if isinstance(reasoning, dict):
             summary = reasoning.get("summary")
@@ -213,6 +258,15 @@ def _extract_thinking(messages: list) -> str:
                 t = blk.get("text") or blk.get("reasoning") or ""
                 if t:
                     out.append(t)
+        # Some langchain-openai versions stash it under m.content as list of dicts
+        c = getattr(m, "content", None)
+        if isinstance(c, list):
+            for blk in c:
+                if isinstance(blk, dict) and blk.get("type") in ("reasoning", "thinking"):
+                    t = blk.get("text") or blk.get("reasoning") or ""
+                    if t:
+                        out.append(t)
+    log.info(f"[thinking] sources_found={found_keys[:8]} chars={sum(len(x) for x in out)}")
     return "\n\n---\n\n".join(out).strip()
 
 
@@ -244,3 +298,99 @@ def _count_tool_calls(messages: list) -> int:
         if hasattr(m, "tool_calls") and m.tool_calls:
             n += len(m.tool_calls)
     return n
+
+
+# ── Streaming variant — yields events as the agent runs ──────────────────────
+
+def ask_stream(agent, question: str, thread_id: str = "default"):
+    """
+    Generator. Yields a sequence of typed events as the agent runs:
+
+      {"kind": "user",     "text": ...}           — once, at start
+      {"kind": "tool_start", "tool": ..., "args": ...}
+      {"kind": "tool_end",   "tool": ..., "duration_ms": ..., "preview": ...}
+      {"kind": "tool_error", "tool": ..., "error": ...}
+      {"kind": "thinking", "text": ...}           — at end, full reasoning trace
+      {"kind": "final",    "text": ..., "tool_calls": N}
+
+    The UI consumes this and renders each event as a chat bubble or inline card.
+
+    Uses agent.stream(stream_mode='updates') under the hood, polling
+    middleware.drain_events between updates to interleave tool events.
+    """
+    log.info(f"[ask_stream] q={question[:80]!r} thread={thread_id}")
+    yield {"kind": "user", "text": question}
+
+    # Drain any stale events from a previous run on this thread.
+    drain_events(thread_id)
+
+    cfg = {"configurable": {"thread_id": thread_id}}
+    chunk_count = 0
+
+    try:
+        for chunk in agent.stream(
+            {"messages": [{"role": "user", "content": question}]},
+            config=cfg,
+            stream_mode="updates",
+        ):
+            chunk_count += 1
+            log.info(f"[stream] chunk #{chunk_count} nodes={list((chunk or {}).keys())}")
+            # Flush tool events that landed during this update.
+            for ev in drain_events(thread_id):
+                phase = ev.get("phase")
+                if phase == "start":
+                    yield {"kind": "tool_start",
+                           "tool": ev.get("tool"), "args": ev.get("args", {})}
+                elif phase == "end":
+                    yield {"kind": "tool_end",
+                           "tool": ev.get("tool"),
+                           "duration_ms": ev.get("duration_ms"),
+                           "preview": ev.get("result_preview", "")}
+                elif phase == "error":
+                    yield {"kind": "tool_error",
+                           "tool": ev.get("tool"),
+                           "error": ev.get("error", "")}
+    except Exception as e:
+        log.info(f"[ask_stream] exception={e!r}")
+        yield {"kind": "tool_error", "tool": "agent", "error": str(e)}
+        return
+
+    # Pull authoritative final state from the checkpointer.
+    final_messages: list = []
+    structured: Any = None
+    try:
+        state = agent.get_state(cfg)
+        if state and state.values:
+            final_messages = state.values.get("messages", []) or []
+            structured = state.values.get("structured_response", None)
+        log.info(f"[ask_stream] final state has {len(final_messages)} messages, "
+                 f"structured={type(structured).__name__ if structured is not None else 'None'}")
+    except Exception as e:
+        log.info(f"[ask_stream] get_state failed: {e!r}")
+
+    # Prefer structured_response if the executor produced one; otherwise fall back
+    # to the last message's plain text.
+    final_text = ""
+    if structured is not None:
+        final_text = "__STRUCTURED__"  # sentinel — UI will read the structured payload
+    elif final_messages:
+        last = final_messages[-1]
+        c = getattr(last, "content", "") or ""
+        if isinstance(c, list):
+            final_text = "".join(
+                b.get("text", "") if isinstance(b, dict) else str(b) for b in c
+            )
+        else:
+            final_text = c
+
+    thinking = _extract_thinking(final_messages)
+    n_calls = _count_tool_calls(final_messages)
+    log.info(f"[ask_stream] DONE n_calls={n_calls} thinking_chars={len(thinking)} "
+             f"answer_chars={len(final_text)}")
+
+    if thinking:
+        yield {"kind": "thinking", "text": thinking}
+    yield {"kind": "final",
+           "text": final_text,
+           "structured": structured,
+           "tool_calls": n_calls}

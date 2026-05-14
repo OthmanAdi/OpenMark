@@ -175,37 +175,222 @@ def search_fn(query: str, category: str, min_score: float, n_results: int):
 
 # ── Chat ──────────────────────────────────────────────────────────────────────
 
-def chat_fn(message: str, history: list, thread_id: str):
-    """Used by gr.ChatInterface — returns the assistant reply with thinking surfaced."""
-    if _agent is None:
+def _fmt_args(args: dict) -> str:
+    """One-line preview of tool args for the live card."""
+    if not args:
+        return ""
+    pairs = []
+    for k, v in list(args.items())[:3]:
+        s = str(v)
+        if len(s) > 60:
+            s = s[:57] + "…"
+        pairs.append(f"{k}={s!r}" if isinstance(v, str) else f"{k}={s}")
+    return ", ".join(pairs)
+
+
+def _esc(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _tool_card(ev: dict) -> str:
+    """Render one tool event as a chat card. End cards show the FULL tool output
+    in an expandable <details> block so the user can see every result, not a
+    truncated crumb."""
+    name = ev.get("tool", "?")
+    args = _fmt_args(ev.get("args", {}))
+    phase = ev.get("phase")
+    if phase == "start":
+        return (f"<div style='background:#0f172a;border-left:3px solid #6366f1;"
+                f"padding:6px 10px;margin:6px 0;border-radius:4px;font-size:0.85em;color:#94a3b8'>"
+                f"🔧 <b style='color:#a5b4fc'>{name}</b>({_esc(args)}) "
+                f"<i style='color:#475569'>running…</i></div>")
+    if phase == "end":
+        dur = ev.get("duration_ms", 0)
+        full = ev.get("result_preview", "") or ""
+        n_chars = len(full)
+        # First 1500 chars rendered inline; full content in a <details> if longer.
+        head = full[:1500]
+        tail = full[1500:] if n_chars > 1500 else ""
+        head_html = _esc(head).replace("\n", "<br>")
+        body = (
+            f"<div style='color:#cbd5e1;font-size:0.85em;margin-top:4px;"
+            f"max-height:280px;overflow:auto;background:#0b1220;padding:6px 8px;"
+            f"border-radius:4px;font-family:ui-monospace,Menlo,monospace;line-height:1.45'>"
+            f"{head_html}"
+            f"</div>"
+        )
+        if tail:
+            body += (
+                f"<details style='margin-top:4px;font-size:0.78em;color:#64748b'>"
+                f"<summary style='cursor:pointer'>show {n_chars - 1500} more chars</summary>"
+                f"<pre style='white-space:pre-wrap;background:#0b1220;padding:6px 8px;"
+                f"border-radius:4px;max-height:420px;overflow:auto;color:#cbd5e1'>"
+                f"{_esc(tail)}</pre></details>"
+            )
         return (
+            f"<div style='background:#0f172a;border-left:3px solid #22c55e;"
+            f"padding:6px 10px;margin:6px 0;border-radius:4px;font-size:0.85em'>"
+            f"<div style='color:#86efac'>✓ <b>{name}</b>({_esc(args)}) "
+            f"<span style='color:#64748b'>· {dur} ms · {n_chars:,} chars</span></div>"
+            f"{body}"
+            f"</div>"
+        )
+    if phase == "error":
+        err = ev.get("error", "")
+        return (f"<div style='background:#0f172a;border-left:3px solid #ef4444;"
+                f"padding:6px 10px;margin:6px 0;border-radius:4px;font-size:0.85em;color:#fca5a5'>"
+                f"✗ <b>{name}</b>({_esc(args)}) · {_esc(err)}</div>")
+    return ""
+
+
+def _render_quick(qa) -> str:
+    """QuickAnswer → compact markdown: summary then numbered citations."""
+    parts = [qa.summary.strip()]
+    if qa.hits:
+        parts.append("")
+        for i, h in enumerate(qa.hits, 1):
+            why = f" — {h.why}" if (getattr(h, "why", "") or "").strip() else ""
+            parts.append(f"{i}. [{h.title}]({h.url}){why}")
+    return "\n".join(parts)
+
+
+def _md_table(t) -> str:
+    """ReportTable → GitHub-flavored markdown table."""
+    if not t or not getattr(t, "headers", None) or not getattr(t, "rows", None):
+        return ""
+    out = []
+    if t.caption:
+        out.append(f"_{t.caption}_")
+        out.append("")
+    out.append("| " + " | ".join(t.headers) + " |")
+    out.append("| " + " | ".join(["---"] * len(t.headers)) + " |")
+    for row in t.rows:
+        # Truncate any cell that's wildly long so the table stays readable.
+        cells = [(str(c) if c is not None else "")[:160].replace("|", "\\|").replace("\n", " ")
+                 for c in row]
+        # Pad/truncate to header length
+        if len(cells) < len(t.headers):
+            cells = cells + [""] * (len(t.headers) - len(cells))
+        else:
+            cells = cells[:len(t.headers)]
+        out.append("| " + " | ".join(cells) + " |")
+    out.append("")
+    return "\n".join(out)
+
+
+def _render_report(r) -> str:
+    """Report → full rich markdown with title, tldr, sections, optional table, citations."""
+    out = []
+    out.append(f"# {r.title.strip()}")
+    out.append("")
+    out.append(f"> **TL;DR.** {r.tldr.strip()}")
+    out.append("")
+    for s in r.sections:
+        out.append(f"## {s.heading.strip()}")
+        out.append("")
+        out.append(s.body_markdown.strip())
+        out.append("")
+    if getattr(r, "table", None):
+        out.append("## Comparison")
+        out.append("")
+        out.append(_md_table(r.table))
+    if r.citations:
+        out.append("## Sources")
+        out.append("")
+        for i, c in enumerate(r.citations, 1):
+            why = f" — {c.why_relevant}" if (getattr(c, "why_relevant", "") or "").strip() else ""
+            out.append(f"{i}. [{c.title}]({c.url}){why}")
+        out.append("")
+    if getattr(r, "suggested_followups", None):
+        out.append("## Threads to pull")
+        out.append("")
+        for q in r.suggested_followups:
+            out.append(f"- {q}")
+        out.append("")
+    conf = getattr(r, "confidence", "medium")
+    conf_color = {"high": "#22c55e", "medium": "#f59e0b", "low": "#ef4444"}.get(conf, "#94a3b8")
+    out.append(
+        f"<div style='font-size:0.78em;color:#94a3b8;margin-top:8px'>"
+        f"Confidence: <span style='color:{conf_color};font-weight:600'>{conf}</span></div>"
+    )
+    return "\n".join(out)
+
+
+def _render_structured(s) -> str:
+    """Dispatch on the structured_response Pydantic class."""
+    cls = type(s).__name__
+    if cls == "QuickAnswer":
+        return _render_quick(s)
+    if cls == "Report":
+        return _render_report(s)
+    # Unknown — render fields
+    try:
+        return f"```json\n{s.model_dump_json(indent=2)}\n```"
+    except Exception:
+        return str(s)
+
+
+def chat_fn(message: str, history: list, thread_id: str):
+    """
+    Streaming generator for gr.ChatInterface.
+    Yields partial markdown as plan / tool events / final answer arrive.
+    """
+    if _agent is None:
+        yield (
             "**Agent unavailable** — Azure API key not configured in `.env`.\n\n"
             "Use the **Search** tab — it works fully offline with local pplx-embed.\n\n"
             f"*Error: {_agent_error}*"
         )
-    from openmark.agent.graph import ask
+        return
+
+    from openmark.agent.graph import ask_stream
+
+    parts: list[str] = []
+    thinking_text = ""
+    n_calls = 0
+
     try:
-        result = ask(_agent, message, thread_id=thread_id or "default")
+        for ev in ask_stream(_agent, message, thread_id=thread_id or "default"):
+            kind = ev.get("kind")
+            if kind == "user":
+                continue
+            elif kind == "tool_start":
+                parts.append(_tool_card({"phase": "start", "tool": ev["tool"], "args": ev.get("args", {})}))
+                n_calls += 1
+            elif kind == "tool_end":
+                parts.append(_tool_card({
+                    "phase": "end",
+                    "tool": ev["tool"],
+                    "args": {},  # already shown on the start card
+                    "duration_ms": ev.get("duration_ms"),
+                    "result_preview": ev.get("preview", ""),
+                }))
+            elif kind == "tool_error":
+                parts.append(_tool_card({
+                    "phase": "error",
+                    "tool": ev.get("tool", "?"),
+                    "error": ev.get("error", ""),
+                }))
+            elif kind == "thinking":
+                thinking_text = ev.get("text", "")
+            elif kind == "final":
+                # Prefer the structured Pydantic payload when present.
+                structured = ev.get("structured")
+                if structured is not None:
+                    final = _render_structured(structured)
+                else:
+                    final = ev.get("text", "") or "_(no response)_"
+                if thinking_text:
+                    parts.append(
+                        "<details><summary>🧠 <b>Thinking</b> · "
+                        f"{n_calls} tool call(s) · codex 5.3 reasoning=high</summary>\n\n"
+                        f"```\n{thinking_text}\n```\n\n</details>"
+                    )
+                parts.append(final)
+            yield "\n".join(parts)
     except Exception as e:
-        return f"❌ **Agent error:** `{e}`"
-
-    if isinstance(result, str):
-        return result
-
-    answer   = result.get("answer", "")
-    thinking = result.get("thinking", "")
-    n_calls  = result.get("tool_calls", 0)
-
-    parts = []
-    if thinking:
-        parts.append(
-            f"<details><summary>🧠 <b>Thinking</b> · {n_calls} tool call(s) · codex 5.3 reasoning=high</summary>\n\n"
-            f"```\n{thinking}\n```\n\n</details>\n"
-        )
-    elif n_calls:
-        parts.append(f"<sub>🔎 {n_calls} tool call(s)</sub>\n")
-    parts.append(answer)
-    return "\n".join(parts)
+        parts.append(f"\n\n❌ **Agent error:** `{e}`")
+        yield "\n".join(parts)
 
 
 # ── Stats ─────────────────────────────────────────────────────────────────────
@@ -620,8 +805,31 @@ def build_ui():
 
             # ── Tab 2: Chat ────────────────────────────────────────────────
             with gr.Tab("Chat" + (" ✓" if _agent else " (no key)")):
-                # Session controls live inside an Accordion so they don't dominate the page.
-                # Default session id "default" is plenty for most flows.
+                # Skill catalogue for the slash-command picker
+                try:
+                    from openmark.agent.skills import list_skills as _list_skills
+                    _skill_rows = _list_skills()
+                except Exception:
+                    _skill_rows = []
+                _skill_radio_choices = [
+                    (f"/{s['short_name']} — {s['description'][:80]}", f"/{s['short_name']} ")
+                    for s in _skill_rows
+                ]
+
+                with gr.Accordion("Skills (click to prefill /command)", open=bool(_skill_rows)):
+                    if _skill_rows:
+                        skill_picker = gr.Radio(
+                            choices=_skill_radio_choices,
+                            label="",
+                            value=None,
+                            info="Click a skill below to insert its slash command into the chat box. "
+                                 "Or just type / at the start of any message and the agent's "
+                                 "OpenMarkSkillMiddleware will suggest skills.",
+                        )
+                    else:
+                        gr.HTML("<i style='color:#64748b'>No skills installed yet.</i>")
+                        skill_picker = None
+
                 with gr.Accordion("Session controls", open=False):
                     thread_input = gr.Textbox(
                         value="default",
@@ -631,32 +839,54 @@ def build_ui():
                     )
                     gr.HTML(
                         "<div style='font-size:0.8em;color:#64748b;line-height:1.5'>"
-                        "<b>Modes (auto-classified):</b> fast · deep · newsletter · digest · dive<br>"
-                        "<b>Tip:</b> for newsletter or weekly digest work, open this repo in Claude Code "
-                        "(<code>cd C:\\Users\\oasrvadmin\\Documents\\OpenMark && claude</code>) — "
-                        "MCP server already wired in <code>.mcp.json</code> and skills live in <code>.claude/skills/openmark-*</code>."
+                        "<b>Slash commands:</b> type <code>/newsletter ...</code>, <code>/deep-research ...</code>, "
+                        "<code>/weekly-digest</code>, <code>/bookmark-dive &lt;URL&gt;</code>, <code>/fast-search ...</code>.<br>"
+                        "Or just ask in plain English — the agent has a load_skill tool and will pick a skill itself."
                         "</div>"
                     )
 
-                gr.ChatInterface(
+                chat_ui = gr.ChatInterface(
                     fn=chat_fn,
                     additional_inputs=[thread_input],
-                    chatbot=gr.Chatbot(height=560, placeholder=(
-                        "<div style='text-align:center;color:#475569;padding:40px'>"
-                        "<div style='font-size:2em'>🔖</div>"
-                        "<div style='margin-top:6px'>Ask anything about your "
-                        f"{_bm_count if isinstance(_bm_count, str) else 'saved'} bookmarks</div>"
-                        "<div style='font-size:0.8em;margin-top:10px;color:#64748b'>"
-                        "Try: &nbsp;<i>What did I save this week?</i> &nbsp;·&nbsp; "
-                        "<i>Research RAG patterns across my saves</i> &nbsp;·&nbsp; "
-                        "<i>Compose a newsletter on context engineering</i> &nbsp;·&nbsp; "
-                        "<i>Expand https://...</i>"
-                        "</div></div>"
-                    )),
+                    chatbot=gr.Chatbot(
+                        height=620,
+                        placeholder=(
+                            "<div style='text-align:center;color:#475569;padding:40px'>"
+                            "<div style='font-size:2em'>🔖</div>"
+                            "<div style='margin-top:6px'>Ask anything about your "
+                            f"{_bm_count if isinstance(_bm_count, str) else 'saved'} bookmarks</div>"
+                            "<div style='font-size:0.8em;margin-top:10px;color:#64748b'>"
+                            "Try: &nbsp;<i>What did I save this week?</i> &nbsp;·&nbsp; "
+                            "<i>/deep-research RAG patterns</i> &nbsp;·&nbsp; "
+                            "<i>/newsletter on context engineering</i> &nbsp;·&nbsp; "
+                            "<i>/bookmark-dive https://...</i>"
+                            "</div></div>"
+                        ),
+                        # F.1 — render LaTeX inline ($...$) and display ($$...$$)
+                        latex_delimiters=[
+                            {"left": "$$", "right": "$$", "display": True},
+                            {"left": "$",  "right": "$",  "display": False},
+                            {"left": "\\(", "right": "\\)", "display": False},
+                            {"left": "\\[", "right": "\\]", "display": True},
+                        ],
+                        # F.2 — keep our HTML cards (details/div/sub) instead of sanitizing them away.
+                        sanitize_html=False,
+                        # F.3 — emit standard markdown so tables/headers/code render natively
+                        render_markdown=True,
+                    ),
                     submit_btn="Send",
                     stop_btn="Stop",
                     fill_height=False,
                 )
+
+                # Wire skill-picker → chat textbox so a click prefills "/<skill> "
+                if skill_picker is not None:
+                    skill_picker.change(
+                        fn=lambda v: v or "",
+                        inputs=[skill_picker],
+                        outputs=[chat_ui.textbox],
+                        show_progress="hidden",
+                    )
 
             # ── Tab 3: Stats ───────────────────────────────────────────────
             with gr.Tab("Stats"):
