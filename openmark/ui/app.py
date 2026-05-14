@@ -345,40 +345,58 @@ def _save_report_to_drafts(report, markdown: str) -> str:
         return ""
 
 
-def _render_structured(s) -> str:
-    """Dispatch on the structured_response Pydantic class. Reports auto-export."""
-    cls = type(s).__name__
-    if cls == "QuickAnswer":
-        return _render_quick(s)
-    if cls == "Report":
-        body = _render_report(s)
-        # Auto-export: drop the Report markdown into drafts/ so the user can
-        # download or re-open it. Gradio serves this via /gradio_api/file=...
-        # because we add DRAFTS_DIR to allowed_paths on launch.
-        path = _save_report_to_drafts(s, body)
-        if path:
-            # Forward-slash path is what gradio's /file= endpoint expects.
-            url_path = path.replace("\\", "/")
-            fname = os.path.basename(path)
-            body += (
-                f"\n\n---\n\n"
-                f"<div style='background:#0f172a;border:1px solid #1e293b;"
-                f"border-radius:8px;padding:10px 14px;margin-top:10px;font-family:sans-serif'>"
-                f"<span style='color:#94a3b8;font-size:0.85em'>📥 Saved to </span>"
-                f"<code style='background:#1e293b;color:#a5b4fc;padding:2px 6px;"
-                f"border-radius:4px;font-size:0.85em'>drafts/{fname}</code>"
-                f" &nbsp;·&nbsp; "
-                f"<a href='/gradio_api/file={url_path}' target='_blank' "
-                f"style='color:#7dd3fc;text-decoration:none;font-weight:600'>"
-                f"⬇ Download Markdown</a>"
-                f"</div>"
-            )
-        return body
-    # Unknown — render fields
+def _looks_like_report(md: str) -> bool:
+    """
+    Heuristic: H1 at start AND at least one of (Sources / Citations / TL;DR)
+    section markers somewhere later. Cheap and works for any well-formed
+    report the agent emits.
+    """
+    if not md or not md.lstrip().startswith("# "):
+        return False
+    low = md.lower()
+    return any(token in low for token in (
+        "## sources", "## citations", "**tl;dr.**", "**tl;dr**", "## tl;dr",
+        "## what i'm reading", "## what i am reading",
+    ))
+
+
+def _maybe_export_report(md: str, first_line_title: str = "") -> str:
+    """If the agent's text response looks like a Report, save to drafts/ and
+    append a download footer. Otherwise return the markdown unchanged."""
+    if not _looks_like_report(md):
+        return md
+    # Title = first H1 line, slugified
+    title = first_line_title
+    if not title:
+        for line in md.splitlines():
+            if line.startswith("# "):
+                title = line[2:].strip()
+                break
+    import time as _time
+    ts = _time.strftime("%Y-%m-%d-%H%M")
+    slug = _slugify(title or "report", 40)
+    fname = f"{ts}-{slug}.md"
+    path = os.path.join(DRAFTS_DIR, fname)
     try:
-        return f"```json\n{s.model_dump_json(indent=2)}\n```"
-    except Exception:
-        return str(s)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(md)
+    except Exception as e:
+        print(f"[drafts] failed to save: {e}")
+        return md
+    url_path = path.replace("\\", "/")
+    return md + (
+        f"\n\n---\n\n"
+        f"<div style='background:#0f172a;border:1px solid #1e293b;"
+        f"border-radius:8px;padding:10px 14px;margin-top:10px;font-family:sans-serif'>"
+        f"<span style='color:#94a3b8;font-size:0.85em'>📥 Saved to </span>"
+        f"<code style='background:#1e293b;color:#a5b4fc;padding:2px 6px;"
+        f"border-radius:4px;font-size:0.85em'>drafts/{fname}</code>"
+        f" &nbsp;·&nbsp; "
+        f"<a href='/gradio_api/file={url_path}' target='_blank' "
+        f"style='color:#7dd3fc;text-decoration:none;font-weight:600'>"
+        f"⬇ Download Markdown</a>"
+        f"</div>"
+    )
 
 
 def chat_fn(message: str, history: list, thread_id: str):
@@ -442,15 +460,13 @@ def chat_fn(message: str, history: list, thread_id: str):
             elif kind == "thinking":
                 thinking_text = ev.get("text", "")
             elif kind == "final":
-                # Prefer the structured Pydantic payload when present.
-                structured = ev.get("structured")
-                if structured is not None:
-                    final = _render_structured(structured)
+                raw = (ev.get("text", "") or "").strip()
+                if not raw:
+                    final = "_(no response)_"
                 else:
-                    final = ev.get("text", "") or "_(no response)_"
-                # Fallback: only show batched thinking if per-turn didn't stream
-                # (graph.py guarantees this by suppressing the final yield in that case,
-                # so usually thinking_text is empty here).
+                    # Auto-export when the agent's markdown looks like a Report.
+                    final = _maybe_export_report(raw)
+                # Fallback: only show batched thinking if per-turn didn't stream.
                 if thinking_text:
                     parts.append(
                         "<details><summary>🧠 <b>Thinking (full trace)</b> · "

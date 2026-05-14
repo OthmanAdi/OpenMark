@@ -17,9 +17,8 @@ Memory: MemorySaver checkpointer keyed by thread_id.
 """
 
 import time
-from typing import Any, Union
+from typing import Any
 from langchain.agents import create_agent
-from langchain.agents.structured_output import ToolStrategy
 from langchain.agents.middleware import (
     AgentState,
     ModelCallLimitMiddleware,
@@ -34,7 +33,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from openmark import config
 from openmark.agent.llms import build_executor, build_classifier
 from openmark.agent.tools import ALL_TOOLS
-from openmark.agent.schemas import QuickAnswer, Report
 from openmark.agent.middleware import (
     OpenMarkSkillMiddleware,
     slash_skill_loader,
@@ -191,10 +189,12 @@ def build_agent():
     agent = create_agent(
         model=llm,
         tools=ALL_TOOLS,
-        # Two-mode structured output. The agent picks QuickAnswer for short lookups,
-        # Report for research/newsletter/comparison/digest output. Validated against
-        # the Pydantic schemas — stored on state["structured_response"].
-        response_format=ToolStrategy(Union[QuickAnswer, Report]),
+        # NO response_format. Skills tell the agent how to structure output
+        # (title + tl;dr + sections + sources for reports; numbered list for
+        # quick answers). Enforcing ToolStrategy(Union[QuickAnswer, Report])
+        # made the agent loop whenever it wanted to ask a clarifying question,
+        # because clarification doesn't fit either schema. UI detects "looks
+        # like a report" from the final markdown and auto-saves it.
         # System prompt is dynamic via @before_model — pass minimal here.
         system_prompt=SYSTEM_PROMPT_TEMPLATE.format(
             bookmarks=11000, tags=5000, categories=19, communities=0,
@@ -379,29 +379,32 @@ def ask_stream(agent, question: str, thread_id: str = "default"):
 
     # Pull authoritative final state from the checkpointer.
     final_messages: list = []
-    structured: Any = None
     try:
         state = agent.get_state(cfg)
         if state and state.values:
             final_messages = state.values.get("messages", []) or []
-            structured = state.values.get("structured_response", None)
-        log.info(f"[ask_stream] final state has {len(final_messages)} messages, "
-                 f"structured={type(structured).__name__ if structured is not None else 'None'}")
+        log.info(f"[ask_stream] final state has {len(final_messages)} messages")
     except Exception as e:
         log.info(f"[ask_stream] get_state failed: {e!r}")
 
-    # Prefer structured_response if the executor produced one; otherwise fall back
-    # to the last message's plain text.
+    # Extract the LAST AIMessage's TEXT content only — skip reasoning blocks.
+    # Azure Responses API returns AIMessage.content as a list of typed blocks;
+    # only blocks with type == "text" (or plain strings) are the response body.
     final_text = ""
-    if structured is not None:
-        final_text = "__STRUCTURED__"  # sentinel — UI will read the structured payload
-    elif final_messages:
+    if final_messages:
         last = final_messages[-1]
         c = getattr(last, "content", "") or ""
         if isinstance(c, list):
-            final_text = "".join(
-                b.get("text", "") if isinstance(b, dict) else str(b) for b in c
-            )
+            text_blocks = []
+            for b in c:
+                if isinstance(b, dict):
+                    btype = b.get("type", "")
+                    if btype in ("text", "output_text") or btype == "":
+                        text_blocks.append(b.get("text", "") or "")
+                    # Skip "reasoning" / "thinking" blocks — they go to turn_thinking.
+                elif isinstance(b, str):
+                    text_blocks.append(b)
+            final_text = "".join(text_blocks)
         else:
             final_text = c
 
@@ -416,5 +419,4 @@ def ask_stream(agent, question: str, thread_id: str = "default"):
         yield {"kind": "thinking", "text": thinking}
     yield {"kind": "final",
            "text": final_text,
-           "structured": structured,
            "tool_calls": n_calls}
