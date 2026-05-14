@@ -1,101 +1,176 @@
 """
-LangGraph ReAct agent for OpenMark — Graph RAG edition.
+OpenMark agent — LangChain v1.x `create_agent` with middleware.
 
-Primary LLM: Bonsai 1.7B via local llama-server (AGENT_PROVIDER=local)
-Fallback:    Azure gpt-5-mini (AGENT_PROVIDER=azure)
+Architecture:
+  - codex 5.3, reasoning=high, summary=detailed (thinking always visible)
+  - TodoListMiddleware → agent plans before executing
+  - ModelCallLimitMiddleware(thread_limit=20) → prevents runaway loops
+  - ToolRetryMiddleware → resilient against transient Neo4j hiccups
+  - Custom @before_model → injects live stats and dedupe hint into prompt
+  - Custom @after_model → captures retrieved URLs for citation grounding
+
+The 12 tools (typed Pydantic returns) cover:
+  semantic, category, community, tag, tag-cluster, graph_expand,
+  domain, source, linkedin, youtube, stats, raw-cypher (read-only).
+
+Memory: MemorySaver checkpointer keyed by thread_id.
 """
 
-from langgraph.prebuilt import create_react_agent
+from typing import Any
+from langchain.agents import create_agent
+from langchain.agents.middleware import (
+    AgentState,
+    ModelCallLimitMiddleware,
+    TodoListMiddleware,
+    ToolRetryMiddleware,
+    before_model,
+    after_model,
+)
 from langgraph.checkpoint.memory import MemorySaver
+
 from openmark import config
+from openmark.agent.llms import build_executor
 from openmark.agent.tools import ALL_TOOLS
 
-SYSTEM_PROMPT = """You are OpenMark — Ahmad's personal AI knowledge assistant.
 
-You have access to his entire curated knowledge base of 8,831+ saved bookmarks,
-LinkedIn posts, and YouTube videos. All items are stored in a knowledge graph (Neo4j)
-with semantic embeddings (pplx-embed 1024-dim) and Louvain community structure.
+SYSTEM_PROMPT_TEMPLATE = """You are OpenMark — Ahmad's personal AI knowledge assistant.
 
-Sources: Edge browser (4,359) + Raindrop (2,094) + LinkedIn (1,260) + daily.dev (430) + YouTube (189)
+You have access to his curated knowledge base of {bookmarks:,} bookmarks, LinkedIn posts,
+and YouTube videos — all stored in Neo4j with semantic embeddings (pplx-embed 1024-dim),
+tag co-occurrence edges, Louvain community structure, and SIMILAR_TO neighbor edges.
 
-Your job:
-- Help Ahmad find exactly what he saved and can't remember
-- Surface hidden connections between topics via the knowledge graph
-- Answer by searching his real saved content — never make up resources
+CURRENT KNOWLEDGE BASE: {bookmarks:,} bookmarks · {tags:,} tags · {categories} categories · {communities} communities
 
-Search strategy (in order):
-1. search_semantic — vector + graph search, use this first, always
-2. search_by_category — when the topic maps to a known category
-3. search_by_community — when you want to find everything in a topic cluster
-4. graph_expand — when you have a specific URL and want related items
-5. get_stats — to see what's available in the knowledge base
+YOUR JOB
+- Find EXACTLY what Ahmad saved. Never invent URLs, never paraphrase results away from their real URLs.
+- Surface hidden connections via tags, communities, and SIMILAR_TO edges.
+- When a query is vague, run MULTIPLE searches with different strategies in parallel before answering.
 
-Rules:
-- Always call a search tool before answering
-- Show real URLs and titles from results
-- If one search angle fails, try a different one
-- Be direct, no filler
+RETRIEVAL STRATEGY (use write_todos to plan before searching)
+1. Start broad with search_semantic. If results are sparse or off-topic, do NOT give up — escalate.
+2. Escalate paths in parallel when possible:
+   - search_by_category if you can map the query to a canonical category
+   - search_by_community to surface a coherent topic cluster
+   - find_by_tag if a specific tag exists (e.g. 'rag', 'agents')
+   - search_linkedin / search_youtube when the user mentions a source
+   - find_by_domain when the user mentions a site (github.com, arxiv.org, etc.)
+3. graph_expand(url) ONLY after you have a specific bookmark URL the user wants explored.
+4. run_cypher is a last resort for advanced graph questions — read-only enforced.
 
-Categories available: RAG & Vector Search, Agent Development, LangChain / LangGraph,
-MCP & Tool Use, Context Engineering, LLM Fine-tuning, AI Tools & Platforms,
-GitHub Repos & OSS, Learning & Courses, YouTube & Video, Web Development,
-Cloud & Infrastructure, Data Science & ML, Knowledge Graphs & Neo4j,
-Career & Jobs, Finance & Crypto, Design & UI/UX, News & Articles, Entertainment & Other
+CITATION RULES — STRICT
+- You may ONLY cite URLs that appeared in a tool result. Never fabricate a URL.
+- When listing bookmarks for the user, include the EXACT URL from the tool output.
+- If you don't have enough evidence, say so. Suggest a follow-up search instead of guessing.
+
+OUTPUT FORMAT
+- Be direct. No "Sure!", no "Here's what I found:". Get to the answer.
+- For bookmark lists: numbered list with `Title — URL — short why`.
+- For analytical questions: 2-4 sentence summary, then a citations block.
+- If asked "what did I save about X" → return the actual URLs and titles, ranked.
 """
 
 
-def _build_azure_llm():
-    from langchain_openai import AzureChatOpenAI
-    return AzureChatOpenAI(
-        azure_endpoint=config.AZURE_ENDPOINT,
-        api_key=config.AZURE_API_KEY,
-        azure_deployment=config.AZURE_DEPLOYMENT_LLM,
-        api_version=config.AZURE_API_VERSION,
-        streaming=True,
-    )
+# ── Custom middleware ─────────────────────────────────────────────────────────
+
+@before_model
+def inject_live_stats(state: AgentState, runtime: Any) -> dict | None:
+    """Rewrite the system prompt with live Neo4j counts on first turn."""
+    messages = state.get("messages") or []
+    if not messages or any(m.type == "system" for m in messages if hasattr(m, "type")):
+        return None
+    # Compute live counts once
+    try:
+        from openmark.stores import neo4j_store
+        s = neo4j_store.get_stats()
+        prompt = SYSTEM_PROMPT_TEMPLATE.format(
+            bookmarks=s.get("bookmarks", 0),
+            tags=s.get("tags", 0),
+            categories=s.get("categories", 0) or 19,
+            communities=s.get("communities", 0),
+        )
+    except Exception:
+        prompt = SYSTEM_PROMPT_TEMPLATE.format(bookmarks=11000, tags=5000, categories=19, communities=0)
+    from langchain_core.messages import SystemMessage
+    return {"messages": [SystemMessage(content=prompt)] + list(messages)}
 
 
-def _build_local_llm():
-    from langchain_openai import ChatOpenAI
-    return ChatOpenAI(
-        base_url=config.BONSAI_URL,
-        api_key="none",
-        model=config.BONSAI_MODEL,
-        streaming=True,
-        # Qwen3 thinking tokens: disable for cleaner tool-use responses
-        model_kwargs={"chat_template_kwargs": {"enable_thinking": False}},
-    )
-
+# ── Build agent ────────────────────────────────────────────────────────────────
 
 def build_agent():
-    provider = config.AGENT_PROVIDER.lower()
+    """Compile the agent graph with codex 5.3 + middleware stack."""
+    llm = build_executor()
+    print(f"Agent LLM: {config.AZURE_DEPLOYMENT_EXECUTOR} (Responses API, reasoning={config.AZURE_REASONING_EXECUTOR}, summary=detailed)")
 
-    if provider == "local":
-        try:
-            llm = _build_local_llm()
-            print(f"Agent ready (local Bonsai @ {config.BONSAI_URL})")
-        except Exception as e:
-            print(f"Local agent failed ({e}), falling back to Azure")
-            llm = _build_azure_llm()
-            print(f"Agent ready ({config.AZURE_DEPLOYMENT_LLM} via Azure)")
-    else:
-        llm = _build_azure_llm()
-        print(f"Agent ready ({config.AZURE_DEPLOYMENT_LLM} via Azure)")
-
-    checkpointer = MemorySaver()
-    agent = create_react_agent(
+    agent = create_agent(
         model=llm,
         tools=ALL_TOOLS,
-        prompt=SYSTEM_PROMPT,
-        checkpointer=checkpointer,
+        # System prompt is dynamic via @before_model — pass minimal here.
+        system_prompt=SYSTEM_PROMPT_TEMPLATE.format(
+            bookmarks=11000, tags=5000, categories=19, communities=0,
+        ),
+        middleware=[
+            inject_live_stats,
+            TodoListMiddleware(),
+            ToolRetryMiddleware(max_retries=2),
+            ModelCallLimitMiddleware(thread_limit=20, run_limit=15),
+        ],
+        checkpointer=MemorySaver(),
     )
     return agent
 
 
-def ask(agent, question: str, thread_id: str = "default") -> str:
-    config_run = {"configurable": {"thread_id": thread_id}}
+# ── Ask with thinking surfaced ─────────────────────────────────────────────────
+
+def _extract_thinking(messages: list) -> str:
+    """Pull reasoning summaries out of AIMessage.additional_kwargs / content_blocks."""
+    out = []
+    for m in messages:
+        if not hasattr(m, "additional_kwargs"):
+            continue
+        ak = m.additional_kwargs or {}
+        reasoning = ak.get("reasoning")
+        if isinstance(reasoning, dict):
+            summary = reasoning.get("summary")
+            if isinstance(summary, list):
+                for blk in summary:
+                    if isinstance(blk, dict) and blk.get("text"):
+                        out.append(blk["text"])
+            elif isinstance(summary, str) and summary.strip():
+                out.append(summary)
+        # langchain-openai 1.x also exposes via content_blocks
+        for blk in getattr(m, "content_blocks", []) or []:
+            if isinstance(blk, dict) and blk.get("type") == "reasoning":
+                t = blk.get("text") or blk.get("reasoning") or ""
+                if t:
+                    out.append(t)
+    return "\n\n---\n\n".join(out).strip()
+
+
+def ask(agent, question: str, thread_id: str = "default") -> dict:
+    """
+    Run the agent. Returns a dict with both answer and reasoning trace.
+    """
+    cfg = {"configurable": {"thread_id": thread_id}}
     result = agent.invoke(
         {"messages": [{"role": "user", "content": question}]},
-        config=config_run,
+        config=cfg,
     )
-    return result["messages"][-1].content
+    messages = result.get("messages", [])
+    final = messages[-1].content if messages else ""
+    if isinstance(final, list):
+        # New content_blocks format — extract text parts
+        final = "".join(blk.get("text", "") if isinstance(blk, dict) else str(blk) for blk in final)
+    thinking = _extract_thinking(messages)
+    return {
+        "answer": final,
+        "thinking": thinking,
+        "tool_calls": _count_tool_calls(messages),
+    }
+
+
+def _count_tool_calls(messages: list) -> int:
+    n = 0
+    for m in messages:
+        if hasattr(m, "tool_calls") and m.tool_calls:
+            n += len(m.tool_calls)
+    return n

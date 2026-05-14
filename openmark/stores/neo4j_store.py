@@ -9,16 +9,26 @@ semantic + graph-structure search in a single Cypher query.
 """
 
 import re
+import atexit
 from urllib.parse import urlparse
 from neo4j import GraphDatabase
 from openmark import config
 
+# Singleton driver — Neo4j drivers are thread-safe and pool connections internally.
+# Opening one driver per call hammers auth and triggers AuthenticationRateLimit.
+_DRIVER = None
+
 
 def get_driver():
-    return GraphDatabase.driver(
-        config.NEO4J_URI,
-        auth=(config.NEO4J_USER, config.NEO4J_PASSWORD),
-    )
+    global _DRIVER
+    if _DRIVER is None:
+        _DRIVER = GraphDatabase.driver(
+            config.NEO4J_URI,
+            auth=(config.NEO4J_USER, config.NEO4J_PASSWORD),
+            max_connection_pool_size=50,
+        )
+        atexit.register(_DRIVER.close)
+    return _DRIVER
 
 
 def setup_schema(driver):
@@ -91,8 +101,7 @@ def ingest(items: list[dict], embeddings: list[list[float]] | None = None, drive
 
     print("Neo4j ingestion complete.")
 
-    if own_driver:
-        driver.close()
+    # NOTE: do not close — driver is module-level singleton via atexit
 
 
 def _write_batch(tx, batch: list[dict], embeddings: list | None):
@@ -191,8 +200,7 @@ def build_similar_to_edges(driver=None):
         n = result.single()["edges"]
         print(f"  SIMILAR_TO: {n} edges built.")
 
-    if own_driver:
-        driver.close()
+    # NOTE: do not close — driver is module-level singleton via atexit
 
 
 def setup_louvain(driver=None):
@@ -249,8 +257,7 @@ def setup_louvain(driver=None):
     except Exception as e:
         print(f"  Louvain failed (GDS not installed?): {e}")
 
-    if own_driver:
-        driver.close()
+    # NOTE: do not close — driver is module-level singleton via atexit
 
 
 # ── Search functions ───────────────────────────────────────────────────────────
@@ -372,9 +379,7 @@ def query(cypher: str, params: dict | None = None) -> list[dict]:
     driver = get_driver()
     with driver.session(database=config.NEO4J_DATABASE) as session:
         result = session.run(cypher, params or {})
-        rows = [dict(r) for r in result]
-    driver.close()
-    return rows
+        return [dict(r) for r in result]
 
 
 def get_stats() -> dict:
@@ -403,8 +408,7 @@ def add_similar_to_edges(similar_pairs: list[tuple[str, str, float]], driver=Non
                 SET r.score = $score
             """, url_a=url_a, url_b=url_b, score=score)
     print(f"  SIMILAR_TO: {len(similar_pairs)} edges written.")
-    if own_driver:
-        driver.close()
+    # NOTE: do not close — driver is module-level singleton via atexit
 
 
 def find_similar(url: str, limit: int = 10) -> list[dict]:

@@ -176,7 +176,7 @@ def search_fn(query: str, category: str, min_score: float, n_results: int):
 # ── Chat ──────────────────────────────────────────────────────────────────────
 
 def chat_fn(message: str, history: list, thread_id: str):
-    """Used by gr.ChatInterface — returns the assistant reply string."""
+    """Used by gr.ChatInterface — returns the assistant reply with thinking surfaced."""
     if _agent is None:
         return (
             "**Agent unavailable** — Azure API key not configured in `.env`.\n\n"
@@ -184,7 +184,28 @@ def chat_fn(message: str, history: list, thread_id: str):
             f"*Error: {_agent_error}*"
         )
     from openmark.agent.graph import ask
-    return ask(_agent, message, thread_id=thread_id or "default")
+    try:
+        result = ask(_agent, message, thread_id=thread_id or "default")
+    except Exception as e:
+        return f"❌ **Agent error:** `{e}`"
+
+    if isinstance(result, str):
+        return result
+
+    answer   = result.get("answer", "")
+    thinking = result.get("thinking", "")
+    n_calls  = result.get("tool_calls", 0)
+
+    parts = []
+    if thinking:
+        parts.append(
+            f"<details><summary>🧠 <b>Thinking</b> · {n_calls} tool call(s) · codex 5.3 reasoning=high</summary>\n\n"
+            f"```\n{thinking}\n```\n\n</details>\n"
+        )
+    elif n_calls:
+        parts.append(f"<sub>🔎 {n_calls} tool call(s)</sub>\n")
+    parts.append(answer)
+    return "\n".join(parts)
 
 
 # ── Stats ─────────────────────────────────────────────────────────────────────

@@ -14,15 +14,26 @@ def pplx_dimension() -> int:
 
 # Agent
 AGENT_PROVIDER         = os.getenv("AGENT_PROVIDER", "azure")   # "azure" or "local"
+AGENT_MODE             = os.getenv("AGENT_MODE", "v2")          # "v1" (ReAct legacy) or "v2" (plan-execute)
 BONSAI_URL             = os.getenv("BONSAI_URL", "http://localhost:8080/v1")
 BONSAI_MODEL           = os.getenv("BONSAI_MODEL", "bonsai-1.7b")
 
-# Azure
+# Azure — primary endpoint
 AZURE_ENDPOINT         = os.getenv("AZURE_ENDPOINT")
 AZURE_API_KEY          = os.getenv("AZURE_API_KEY")
-AZURE_DEPLOYMENT_LLM   = os.getenv("AZURE_DEPLOYMENT_LLM", "gpt-4o-mini")
+AZURE_DEPLOYMENT_LLM   = os.getenv("AZURE_DEPLOYMENT_LLM", "gpt-4o-mini")     # legacy / fallback
 AZURE_DEPLOYMENT_EMBED = os.getenv("AZURE_DEPLOYMENT_EMBED", "text-embedding-ada-002")
 AZURE_API_VERSION      = os.getenv("AZURE_API_VERSION", "2024-05-01-preview")
+
+# Azure — codex 5.3 everywhere, reasoning=high, detailed thinking visible
+# (locked in 2026-05-10 — no silent fallback to gpt-5-mini)
+AZURE_DEPLOYMENT_PLANNER     = os.getenv("AZURE_DEPLOYMENT_PLANNER",     "codex-5-3")
+AZURE_DEPLOYMENT_EXECUTOR    = os.getenv("AZURE_DEPLOYMENT_EXECUTOR",    "codex-5-3")
+AZURE_DEPLOYMENT_SYNTHESIZER = os.getenv("AZURE_DEPLOYMENT_SYNTHESIZER", "codex-5-3")
+AZURE_REASONING_PLANNER      = os.getenv("AZURE_REASONING_PLANNER",      "high")
+AZURE_REASONING_EXECUTOR     = os.getenv("AZURE_REASONING_EXECUTOR",     "high")
+AZURE_REASONING_SYNTHESIZER  = os.getenv("AZURE_REASONING_SYNTHESIZER",  "high")
+AZURE_VERBOSITY_SYNTHESIZER  = os.getenv("AZURE_VERBOSITY_SYNTHESIZER",  "medium")
 
 # Neo4j
 NEO4J_URI              = os.getenv("NEO4J_URI", "bolt://127.0.0.1:7687")

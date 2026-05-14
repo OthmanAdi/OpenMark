@@ -56,7 +56,7 @@ def build_document_text(item: dict) -> str:
 
 def normalize_item(item: dict) -> dict:
     """Clean and normalize a single bookmark item."""
-    url   = item.get("url", "").strip()
+    url   = item.get("url", "").strip().rstrip("/").lower()
     title = clean_title(item.get("title", ""))
     cat   = fix_category(item.get("category"))
     tags  = [t.lower().strip() for t in item.get("tags", []) if t][:5]
