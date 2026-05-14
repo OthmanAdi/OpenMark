@@ -179,9 +179,19 @@ def inject_live_stats(state: AgentState, runtime: Any) -> dict | None:
 # ── Build agent ────────────────────────────────────────────────────────────────
 
 def build_agent():
-    """Compile the agent graph with codex 5.3 + middleware stack."""
+    """Compile the agent graph with the configured provider + middleware stack."""
     llm = build_executor()
-    print(f"Agent LLM: {config.AZURE_DEPLOYMENT_EXECUTOR} (Responses API, reasoning={config.AZURE_REASONING_EXECUTOR}, summary=detailed)")
+    provider = (getattr(config, "AGENT_PROVIDER", "azure") or "azure").lower()
+    if provider == "local":
+        print("=" * 72)
+        print(f"AGENT PROVIDER = LOCAL   (Azure is NOT being used)")
+        print(f"  endpoint : {config.BONSAI_URL}")
+        print(f"  model    : {config.BONSAI_MODEL}")
+        print("  all roles (executor, classifier, summarizer) -> same local endpoint")
+        print("=" * 72)
+    else:
+        print(f"AGENT PROVIDER = AZURE   model={config.AZURE_DEPLOYMENT_EXECUTOR} "
+              f"(Responses API, reasoning={config.AZURE_REASONING_EXECUTOR}, summary=detailed)")
 
     # Cheap model for SummarizationMiddleware — same gpt-5-mini we already build for the classifier.
     summarizer_llm = build_classifier()
