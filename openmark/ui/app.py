@@ -243,79 +243,6 @@ def _tool_card(ev: dict) -> str:
     return ""
 
 
-def _render_quick(qa) -> str:
-    """QuickAnswer → compact markdown: summary then numbered citations."""
-    parts = [qa.summary.strip()]
-    if qa.hits:
-        parts.append("")
-        for i, h in enumerate(qa.hits, 1):
-            why = f" — {h.why}" if (getattr(h, "why", "") or "").strip() else ""
-            parts.append(f"{i}. [{h.title}]({h.url}){why}")
-    return "\n".join(parts)
-
-
-def _md_table(t) -> str:
-    """ReportTable → GitHub-flavored markdown table."""
-    if not t or not getattr(t, "headers", None) or not getattr(t, "rows", None):
-        return ""
-    out = []
-    if t.caption:
-        out.append(f"_{t.caption}_")
-        out.append("")
-    out.append("| " + " | ".join(t.headers) + " |")
-    out.append("| " + " | ".join(["---"] * len(t.headers)) + " |")
-    for row in t.rows:
-        # Truncate any cell that's wildly long so the table stays readable.
-        cells = [(str(c) if c is not None else "")[:160].replace("|", "\\|").replace("\n", " ")
-                 for c in row]
-        # Pad/truncate to header length
-        if len(cells) < len(t.headers):
-            cells = cells + [""] * (len(t.headers) - len(cells))
-        else:
-            cells = cells[:len(t.headers)]
-        out.append("| " + " | ".join(cells) + " |")
-    out.append("")
-    return "\n".join(out)
-
-
-def _render_report(r) -> str:
-    """Report → full rich markdown with title, tldr, sections, optional table, citations."""
-    out = []
-    out.append(f"# {r.title.strip()}")
-    out.append("")
-    out.append(f"> **TL;DR.** {r.tldr.strip()}")
-    out.append("")
-    for s in r.sections:
-        out.append(f"## {s.heading.strip()}")
-        out.append("")
-        out.append(s.body_markdown.strip())
-        out.append("")
-    if getattr(r, "table", None):
-        out.append("## Comparison")
-        out.append("")
-        out.append(_md_table(r.table))
-    if r.citations:
-        out.append("## Sources")
-        out.append("")
-        for i, c in enumerate(r.citations, 1):
-            why = f" — {c.why_relevant}" if (getattr(c, "why_relevant", "") or "").strip() else ""
-            out.append(f"{i}. [{c.title}]({c.url}){why}")
-        out.append("")
-    if getattr(r, "suggested_followups", None):
-        out.append("## Threads to pull")
-        out.append("")
-        for q in r.suggested_followups:
-            out.append(f"- {q}")
-        out.append("")
-    conf = getattr(r, "confidence", "medium")
-    conf_color = {"high": "#22c55e", "medium": "#f59e0b", "low": "#ef4444"}.get(conf, "#94a3b8")
-    out.append(
-        f"<div style='font-size:0.78em;color:#94a3b8;margin-top:8px'>"
-        f"Confidence: <span style='color:{conf_color};font-weight:600'>{conf}</span></div>"
-    )
-    return "\n".join(out)
-
-
 DRAFTS_DIR = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "drafts")
 )
@@ -329,35 +256,43 @@ def _slugify(s: str, n: int = 50) -> str:
     return (s or "report")[:n]
 
 
-def _save_report_to_drafts(report, markdown: str) -> str:
-    """Write the rendered report to drafts/ and return the file path."""
-    import time as _time
-    ts = _time.strftime("%Y-%m-%d-%H%M")
-    slug = _slugify(getattr(report, "title", "report") or "report", 40)
-    fname = f"{ts}-{slug}.md"
-    path = os.path.join(DRAFTS_DIR, fname)
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(markdown)
-        return path
-    except Exception as e:
-        print(f"[drafts] failed to save report: {e}")
-        return ""
+_URL_RE = __import__("re").compile(r"https?://[^\s\)\]'\"<>]+", __import__("re").IGNORECASE)
 
 
 def _looks_like_report(md: str) -> bool:
     """
-    Heuristic: H1 at start AND at least one of (Sources / Citations / TL;DR)
-    section markers somewhere later. Cheap and works for any well-formed
-    report the agent emits.
+    Heuristic — fires when any of these is true:
+      (a) Starts with `# H1` AND contains a Sources / Citations / TL;DR marker.
+      (b) Starts with `# H1` AND has 4+ URLs (any newsletter-shaped doc).
+      (c) Has 5+ URLs AND >= 500 chars (numbered recommendation list or
+          'Sources cited above:' block — even when the agent forgets the H1).
+      (d) Contains an explicit 'Sources cited above:' line — matches the
+          openmark-newsletter skill template footer.
+    Anything that fires (a)-(d) is worth saving as a draft so Ahmad can
+    re-read or edit it later.
     """
-    if not md or not md.lstrip().startswith("# "):
+    if not md:
         return False
+    stripped = md.lstrip()
     low = md.lower()
-    return any(token in low for token in (
+    n_urls = len(_URL_RE.findall(md))
+    starts_h1 = stripped.startswith("# ")
+    markers = (
         "## sources", "## citations", "**tl;dr.**", "**tl;dr**", "## tl;dr",
         "## what i'm reading", "## what i am reading",
-    ))
+        "sources cited above", "sources cited:",
+    )
+    has_marker = any(t in low for t in markers)
+
+    if starts_h1 and has_marker:
+        return True                            # (a)
+    if starts_h1 and n_urls >= 4:
+        return True                            # (b)
+    if n_urls >= 5 and len(md) >= 500:
+        return True                            # (c)
+    if has_marker and n_urls >= 3:
+        return True                            # (d)
+    return False
 
 
 def _maybe_export_report(md: str, first_line_title: str = "") -> str:

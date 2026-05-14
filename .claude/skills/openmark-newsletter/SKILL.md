@@ -93,17 +93,35 @@ Fill the template. Rules while drafting:
 - **What I'm reading** is the spine. 5–7 items. Each has Title — URL — one-line why.
 - **Sources cited** at the bottom is a flat list — every URL you used, exactly as it appeared in tool output. No invented URLs. Ever.
 
-### 6. Save and surface
+### 6. Format rules — NON-NEGOTIABLE
 
-Save the draft to `drafts/newsletter-YYYY-MM-DD-<slug>.md` in the project root. Then output a short summary to Ahmad:
+These exist because the chat UI auto-saves any response that looks like a
+newsletter, and bad formatting breaks the save AND makes the message a
+wall of text:
+
+- **Start with `# Title`** on its own line. Period. The chat's
+  auto-export heuristic and the markdown renderer both depend on this.
+- **EVERY section header is `## Heading`** on its own line.
+- **Every numbered item is on its own line.** Put a BLANK LINE between
+  every two items if the items contain inline links, otherwise the
+  renderer collapses them into one wrapped paragraph.
+- **End with a `## Sources` (or `## Sources cited`) section** containing the
+  flat URL list. This is what unlocks the auto-save + download link.
+- Do NOT emit the response as a single paragraph. Every paragraph break is
+  a literal blank line in the output.
+- Do NOT wrap the whole thing in a code fence. It's markdown, not code.
+
+### 7. Save and surface
+
+The chat UI saves the draft automatically once your output passes the
+report heuristic above. You do not need to write the file yourself. After
+emitting the draft, add a one-line meta footer like:
 
 ```
-Draft saved: drafts/newsletter-2026-05-14-context-engineering.md
-Word count: 612
-Sources used: 11 OpenMark hits + 4 WebFetch extracts
+_<word_count> words · <N> OpenMark hits cited · <M> WebFetch extracts_
 ```
 
-Don't paste the full draft into chat unless Ahmad asks. He'll read the file.
+Then stop. Don't repeat the draft or summarize it.
 
 ## What NOT to do
 

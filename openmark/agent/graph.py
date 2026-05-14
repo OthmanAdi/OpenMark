@@ -388,23 +388,31 @@ def ask_stream(agent, question: str, thread_id: str = "default"):
         log.info(f"[ask_stream] get_state failed: {e!r}")
 
     # Extract the LAST AIMessage's TEXT content only — skip reasoning blocks.
-    # Azure Responses API returns AIMessage.content as a list of typed blocks;
-    # only blocks with type == "text" (or plain strings) are the response body.
+    # Azure Responses API returns AIMessage.content as a list of typed blocks.
+    # Each text block can be a sentence, a paragraph, or even a single list item;
+    # we must join them with a paragraph break ("\n\n") so markdown renders the
+    # numbered list / sections instead of collapsing into one wrapped paragraph.
     final_text = ""
     if final_messages:
         last = final_messages[-1]
         c = getattr(last, "content", "") or ""
         if isinstance(c, list):
-            text_blocks = []
+            text_blocks: list[str] = []
             for b in c:
                 if isinstance(b, dict):
                     btype = b.get("type", "")
                     if btype in ("text", "output_text") or btype == "":
-                        text_blocks.append(b.get("text", "") or "")
+                        txt = (b.get("text", "") or "").strip()
+                        if txt:
+                            text_blocks.append(txt)
                     # Skip "reasoning" / "thinking" blocks — they go to turn_thinking.
                 elif isinstance(b, str):
-                    text_blocks.append(b)
-            final_text = "".join(text_blocks)
+                    if b.strip():
+                        text_blocks.append(b.strip())
+            log.info(f"[ask_stream] final has {len(text_blocks)} text block(s); "
+                     f"sizes={[len(t) for t in text_blocks][:8]}")
+            # Paragraph break between blocks so markdown lists / headers survive.
+            final_text = "\n\n".join(text_blocks)
         else:
             final_text = c
 

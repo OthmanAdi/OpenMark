@@ -270,7 +270,15 @@ def vector_search(
 ) -> list[dict]:
     """
     Combined vector + graph search in a single Cypher query.
-    Returns bookmarks with tags and similar URLs attached.
+
+    Implementation note: Cypher 25's pre-filtered SEARCH (`WHERE` inside the
+    SEARCH block) requires the filter property to be backed by a range index.
+    Our denormalized `b.source` / `b.category` aren't range-indexed, so the
+    pre-filter form raises Neo.ClientError.Statement.PropertyNotFound at runtime.
+
+    Workaround: over-fetch from the vector index (no pre-filter), then apply
+    the filter as a normal WHERE on the matched node. Slightly more reads,
+    but works on every Neo4j 5+/2026 deploy without extra schema changes.
     """
     filters = []
     params: dict = {"embedding": query_embedding, "n": n}
@@ -281,17 +289,22 @@ def vector_search(
         filters.append("b.source = $source")
         params["source"] = source
 
-    search_where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    post_where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    # When filtering, pull a wider candidate set from ANN so we still have
+    # enough hits after post-filtering. 200 is the same budget search_youtube uses.
+    ann_limit = 200 if filters else n
 
-    # Cypher 25 SEARCH syntax (Neo4j 2026+) — pre-filters inside ANN for efficiency
     cypher = f"""
-        MATCH (b)
-          SEARCH b IN (
-            VECTOR INDEX bookmark_embedding
-            FOR $embedding
-            {search_where}
-            LIMIT $n
-          ) SCORE AS score
+        CALL () {{
+            MATCH (b)
+              SEARCH b IN (
+                VECTOR INDEX bookmark_embedding
+                FOR $embedding
+                LIMIT {ann_limit}
+              ) SCORE AS score
+            {post_where}
+            RETURN b, score LIMIT $n
+        }}
         OPTIONAL MATCH (b)-[:TAGGED]->(t:Tag)
         OPTIONAL MATCH (b)-[:SIMILAR_TO]->(s:Bookmark)
         OPTIONAL MATCH (b)-[:IN_COMMUNITY]->(comm:Community)
