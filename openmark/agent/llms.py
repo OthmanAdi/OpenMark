@@ -71,3 +71,30 @@ def build_synthesizer():
 def build_default():
     """Single LLM for the legacy v1 ReAct agent — codex 5.3 high. No fallback."""
     return build_executor()
+
+
+def build_classifier():
+    """
+    Cheap, low-latency tier for query classification (fast vs deep vs newsletter vs digest vs dive).
+    Defaults to gpt-5-mini. Can be pointed at Azure `model-router` deployment by setting
+    AZURE_DEPLOYMENT_CLASSIFIER=model-router in .env — Foundry will then pick the smallest
+    viable model per call automatically.
+    """
+    deployment = config.AZURE_DEPLOYMENT_CLASSIFIER
+    is_reasoning = deployment.startswith("gpt-5") or "codex" in deployment.lower()
+
+    if is_reasoning:
+        return AzureChatOpenAI(
+            azure_deployment=deployment,
+            model_kwargs=_codex_kwargs(effort=config.AZURE_REASONING_CLASSIFIER, verbosity="low"),
+            **_base_kwargs(),
+        )
+    # Chat-completion path for non-reasoning routers (model-router, gpt-4o, etc.)
+    return AzureChatOpenAI(
+        azure_deployment=deployment,
+        azure_endpoint=config.AZURE_ENDPOINT,
+        api_key=config.AZURE_API_KEY,
+        api_version=config.AZURE_API_VERSION,
+        temperature=0,
+        max_tokens=120,
+    )

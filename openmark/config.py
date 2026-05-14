@@ -25,15 +25,22 @@ AZURE_DEPLOYMENT_LLM   = os.getenv("AZURE_DEPLOYMENT_LLM", "gpt-4o-mini")     # 
 AZURE_DEPLOYMENT_EMBED = os.getenv("AZURE_DEPLOYMENT_EMBED", "text-embedding-ada-002")
 AZURE_API_VERSION      = os.getenv("AZURE_API_VERSION", "2024-05-01-preview")
 
-# Azure — codex 5.3 everywhere, reasoning=high, detailed thinking visible
-# (locked in 2026-05-10 — no silent fallback to gpt-5-mini)
-AZURE_DEPLOYMENT_PLANNER     = os.getenv("AZURE_DEPLOYMENT_PLANNER",     "codex-5-3")
-AZURE_DEPLOYMENT_EXECUTOR    = os.getenv("AZURE_DEPLOYMENT_EXECUTOR",    "codex-5-3")
-AZURE_DEPLOYMENT_SYNTHESIZER = os.getenv("AZURE_DEPLOYMENT_SYNTHESIZER", "codex-5-3")
+# Azure — gpt-5.3-codex everywhere for the heavy executor + synthesizer.
+# Reasoning=high default with detailed summary so thinking is visible in UI.
+# (locked 2026-05-10, refined 2026-05-14 with explicit classifier + router tiers)
+AZURE_DEPLOYMENT_PLANNER     = os.getenv("AZURE_DEPLOYMENT_PLANNER",     "gpt-5.3-codex")
+AZURE_DEPLOYMENT_EXECUTOR    = os.getenv("AZURE_DEPLOYMENT_EXECUTOR",    "gpt-5.3-codex")
+AZURE_DEPLOYMENT_SYNTHESIZER = os.getenv("AZURE_DEPLOYMENT_SYNTHESIZER", "gpt-5.3-codex")
 AZURE_REASONING_PLANNER      = os.getenv("AZURE_REASONING_PLANNER",      "high")
 AZURE_REASONING_EXECUTOR     = os.getenv("AZURE_REASONING_EXECUTOR",     "high")
 AZURE_REASONING_SYNTHESIZER  = os.getenv("AZURE_REASONING_SYNTHESIZER",  "high")
 AZURE_VERBOSITY_SYNTHESIZER  = os.getenv("AZURE_VERBOSITY_SYNTHESIZER",  "medium")
+
+# Cheap fast tier: classifier picks fast / deep / newsletter / digest / dive intent.
+# Defaults to gpt-5-mini (cheap, low-latency). Azure `model-router` deployment also
+# works here if you'd rather let Foundry pick the smallest viable model per call.
+AZURE_DEPLOYMENT_CLASSIFIER  = os.getenv("AZURE_DEPLOYMENT_CLASSIFIER", "gpt-5-mini")
+AZURE_REASONING_CLASSIFIER   = os.getenv("AZURE_REASONING_CLASSIFIER",  "low")
 
 # Neo4j
 NEO4J_URI              = os.getenv("NEO4J_URI", "bolt://127.0.0.1:7687")

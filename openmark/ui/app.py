@@ -620,28 +620,39 @@ def build_ui():
 
             # ── Tab 2: Chat ────────────────────────────────────────────────
             with gr.Tab("Chat" + (" ✓" if _agent else " (no key)")):
-                thread_input = gr.Textbox(
-                    value="default", label="Session ID",
-                    info="Change to start a fresh conversation thread",
-                    scale=1,
-                )
+                # Session controls live inside an Accordion so they don't dominate the page.
+                # Default session id "default" is plenty for most flows.
+                with gr.Accordion("Session controls", open=False):
+                    thread_input = gr.Textbox(
+                        value="default",
+                        label="Session ID",
+                        info="Change to start a fresh thread. Most of the time leave as 'default'.",
+                        scale=1,
+                    )
+                    gr.HTML(
+                        "<div style='font-size:0.8em;color:#64748b;line-height:1.5'>"
+                        "<b>Modes (auto-classified):</b> fast · deep · newsletter · digest · dive<br>"
+                        "<b>Tip:</b> for newsletter or weekly digest work, open this repo in Claude Code "
+                        "(<code>cd C:\\Users\\oasrvadmin\\Documents\\OpenMark && claude</code>) — "
+                        "MCP server already wired in <code>.mcp.json</code> and skills live in <code>.claude/skills/openmark-*</code>."
+                        "</div>"
+                    )
+
                 gr.ChatInterface(
                     fn=chat_fn,
                     additional_inputs=[thread_input],
-                    chatbot=gr.Chatbot(height=480, placeholder=(
+                    chatbot=gr.Chatbot(height=560, placeholder=(
                         "<div style='text-align:center;color:#475569;padding:40px'>"
                         "<div style='font-size:2em'>🔖</div>"
-                        "<div>Ask anything about your 10,000+ saved bookmarks</div>"
-                        "<div style='font-size:0.8em;margin-top:8px'>e.g. \"What did I save about LangGraph agents?\"</div>"
-                        "</div>"
+                        "<div style='margin-top:6px'>Ask anything about your "
+                        f"{_bm_count if isinstance(_bm_count, str) else 'saved'} bookmarks</div>"
+                        "<div style='font-size:0.8em;margin-top:10px;color:#64748b'>"
+                        "Try: &nbsp;<i>What did I save this week?</i> &nbsp;·&nbsp; "
+                        "<i>Research RAG patterns across my saves</i> &nbsp;·&nbsp; "
+                        "<i>Compose a newsletter on context engineering</i> &nbsp;·&nbsp; "
+                        "<i>Expand https://...</i>"
+                        "</div></div>"
                     )),
-                    examples=[
-                        ["What did I save about LangGraph?", "default"],
-                        ["Find my bookmarks on fine-tuning LLMs", "default"],
-                        ["Show me everything about vector databases", "default"],
-                        ["What YouTube videos did I save about AI agents?", "default"],
-                        ["Find resources on context engineering", "default"],
-                    ],
                     submit_btn="Send",
                     stop_btn="Stop",
                     fill_height=False,

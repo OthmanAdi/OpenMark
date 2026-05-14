@@ -29,8 +29,34 @@ from langchain.agents.middleware import (
 from langgraph.checkpoint.memory import MemorySaver
 
 from openmark import config
-from openmark.agent.llms import build_executor
+from openmark.agent.llms import build_executor, build_classifier
 from openmark.agent.tools import ALL_TOOLS
+
+
+# ── Lazy classifier ───────────────────────────────────────────────────────────
+_classifier = None
+def _get_classifier():
+    global _classifier
+    if _classifier is None:
+        _classifier = build_classifier()
+    return _classifier
+
+
+CLASSIFIER_PROMPT = """Classify the user's query about Ahmad's bookmark knowledge base.
+
+Pick exactly ONE label from this list, output the label and nothing else:
+
+- fast        : a single concrete lookup ("find my bookmarks on X", one-tool answer)
+- deep        : multi-angle research, comparison, landscape questions
+- newsletter  : asked to draft / compose / write a newsletter
+- digest      : "what did I save this week / last N days", time-window recap
+- dive        : a single URL with "expand", "dig into", "neighbors of"
+
+If unsure, output `fast`.
+
+User query: {query}
+
+Label:"""
 
 
 SYSTEM_PROMPT_TEMPLATE = """You are OpenMark — Ahmad's personal AI knowledge assistant.
@@ -74,11 +100,41 @@ OUTPUT FORMAT
 
 @before_model
 def inject_live_stats(state: AgentState, runtime: Any) -> dict | None:
-    """Rewrite the system prompt with live Neo4j counts on first turn."""
+    """
+    On the first turn:
+      1. Run the cheap classifier (gpt-5-mini) to pick a mode label.
+      2. Rewrite the system prompt with live Neo4j counts AND the mode hint.
+    """
     messages = state.get("messages") or []
     if not messages or any(m.type == "system" for m in messages if hasattr(m, "type")):
         return None
-    # Compute live counts once
+
+    # Pull the user's first user message text for classification
+    last_user_text = ""
+    for m in messages:
+        if getattr(m, "type", "") == "human":
+            last_user_text = getattr(m, "content", "") or ""
+            if isinstance(last_user_text, list):
+                last_user_text = " ".join(
+                    b.get("text", "") if isinstance(b, dict) else str(b) for b in last_user_text
+                )
+            break
+
+    # Cheap classification — fall back to "fast" on any error
+    mode = "fast"
+    try:
+        if last_user_text.strip():
+            cls_resp = _get_classifier().invoke(CLASSIFIER_PROMPT.format(query=last_user_text.strip()))
+            raw = (cls_resp.content if hasattr(cls_resp, "content") else str(cls_resp)).strip().lower()
+            if isinstance(raw, list):
+                raw = " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in raw)
+            for cand in ("newsletter", "digest", "deep", "dive", "fast"):
+                if cand in raw:
+                    mode = cand
+                    break
+    except Exception as e:
+        print(f"[classifier] failed: {e}; defaulting mode=fast")
+
     try:
         from openmark.stores import neo4j_store
         s = neo4j_store.get_stats()
@@ -89,7 +145,21 @@ def inject_live_stats(state: AgentState, runtime: Any) -> dict | None:
             communities=s.get("communities", 0),
         )
     except Exception:
-        prompt = SYSTEM_PROMPT_TEMPLATE.format(bookmarks=11000, tags=5000, categories=19, communities=0)
+        prompt = SYSTEM_PROMPT_TEMPLATE.format(bookmarks=13000, tags=5000, categories=19, communities=0)
+
+    prompt += f"\n\nMODE: {mode}  (classifier set this; tailor your effort accordingly)\n"
+    if mode == "fast":
+        prompt += "- Single tool call. Render results in 10 seconds. No graph_expand, no Cypher.\n"
+    elif mode == "deep":
+        prompt += "- Multi-angle parallel search (semantic + community or tag). 2-3 graph_expand on winners. Cite only observed URLs.\n"
+    elif mode == "newsletter":
+        prompt += "- This is newsletter material. Pull broad source, rank, recommend 5-7 anchor bookmarks. Don't draft prose here — the Claude Code skill openmark-newsletter handles drafts.\n"
+    elif mode == "digest":
+        prompt += "- Time window query. Use find_recent or search_by_date_range. Group by category/tag. Compact output.\n"
+    elif mode == "dive":
+        prompt += "- One URL focus. Use get_bookmark_full + graph_expand. Return structured neighborhood, not prose.\n"
+
+    print(f"[classifier] mode={mode}")
     from langchain_core.messages import SystemMessage
     return {"messages": [SystemMessage(content=prompt)] + list(messages)}
 

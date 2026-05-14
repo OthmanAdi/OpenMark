@@ -48,7 +48,14 @@ skills-lock.json
 .zencoder/
 
 # ── Claude Code internal state ────────────────────────────────
-.claude/
+.claude/*
+# but DO commit project-specific OpenMark skills:
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/openmark-*/
+
+# ── Newsletter drafts (personal) ─────────────────────────────
+drafts/
 
 # ── MCP config (machine-specific paths) ──────────────────────
 .mcp.json
