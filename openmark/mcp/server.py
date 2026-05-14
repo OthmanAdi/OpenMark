@@ -401,6 +401,97 @@ def run_cypher(cypher: str) -> dict:
         return _err("cypher", str(e))
 
 
+# ── Web research (mirrored from openmark.agent.tools) ────────────────────────
+from openmark.agent import web as _web
+
+
+@mcp.tool
+def web_search(query: str, n: int = 8) -> dict:
+    """
+    Search the open web. Auto-fallback: Tavily (TAVILY_API_KEY) > Brave
+    (BRAVE_API_KEY) > DuckDuckGo (no key). Use when you need FRESH info
+    beyond Ahmad's bookmarks.
+    """
+    try:
+        return {"strategy": "web_search", "query": query, "hits": _web.web_search(query, n=n)}
+    except Exception as e:
+        return _err("web_search", str(e))
+
+
+@mcp.tool
+def web_fetch(url: str, max_chars: int = 12000) -> dict:
+    """
+    Fetch a single URL, return main content as clean markdown.
+    Use AFTER web_search to read promising hits.
+    """
+    try:
+        return {"strategy": "web_fetch", **_web.web_fetch(url, max_chars=max_chars)}
+    except Exception as e:
+        return _err("web_fetch", str(e))
+
+
+@mcp.tool
+def github_repo_intel(slug_or_url: str, days: int = 30) -> dict:
+    """
+    Public GitHub repo snapshot: meta, README, recent commits, open PRs.
+    Pass 'owner/name' slug or any github.com URL.
+    """
+    try:
+        return {"strategy": "github", **_web.github_repo_intel(slug_or_url, days=days)}
+    except Exception as e:
+        return _err("github", str(e))
+
+
+@mcp.tool
+def web_extract(urls: list[str], depth: str = "advanced") -> dict:
+    """
+    Tavily multi-URL clean extraction. Up to ~20 URLs per call.
+    depth: 'basic' | 'advanced'. Requires TAVILY_API_KEY.
+    """
+    try:
+        return {"strategy": "web_extract", "depth": depth,
+                "results": _web.tavily_extract(urls or [], depth=depth)}
+    except Exception as e:
+        return _err("web_extract", str(e))
+
+
+@mcp.tool
+def web_crawl(seed_url: str, max_depth: int = 1, max_breadth: int = 5,
+              limit: int = 8, instructions: str = "") -> dict:
+    """
+    Tavily multi-page crawl from seed_url. Optional natural-language
+    `instructions` steers link selection. Requires TAVILY_API_KEY.
+    """
+    try:
+        return {
+            "strategy": "web_crawl", "seed_url": seed_url,
+            "results": _web.tavily_crawl(
+                seed_url, max_depth=max_depth, max_breadth=max_breadth,
+                limit=limit, instructions=(instructions or None),
+            ),
+        }
+    except Exception as e:
+        return _err("web_crawl", str(e))
+
+
+@mcp.tool
+def reddit_search(query: str, subreddit: str = "", n: int = 15) -> dict:
+    """
+    Search Reddit. Optional subreddit narrows (e.g. 'muapi', 'LocalLLaMA').
+    Returns posts with score, comments, permalink, body snippet. No auth.
+    """
+    try:
+        sub = (subreddit or "").strip() or None
+        return {
+            "strategy": "reddit",
+            "query": query,
+            "subreddit": sub,
+            "posts": _web.reddit_search(query, subreddit=sub, n=n),
+        }
+    except Exception as e:
+        return _err("reddit", str(e))
+
+
 if __name__ == "__main__":
     sys.stderr.write("OpenMark MCP server running (stdio)\n")
     mcp.run()

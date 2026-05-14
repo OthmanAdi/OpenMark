@@ -432,6 +432,203 @@ def run_cypher(cypher: str) -> str:
         return f"[strategy=cypher] ERROR: {e}"
 
 
+# ── Web research tools ───────────────────────────────────────────────────────
+# Built 2026-05-14. Implementations live in openmark/agent/web.py so the
+# transport (httpx, DDG, GitHub, Reddit) is testable without a tool decorator.
+from openmark.agent import web as _web
+
+
+@tool
+def web_search(query: str, n: int = 8) -> str:
+    """
+    Search the open web. Use when the user's question needs FRESH information
+    beyond Ahmad's saved bookmarks — current events, latest releases, "what
+    does the internet say about X."
+
+    Provider stack (auto-fallback): Tavily (if TAVILY_API_KEY set) > Brave
+    (if BRAVE_API_KEY set) > DuckDuckGo HTML (no key).
+
+    Returns up to n hits as a numbered markdown list with title, url, snippet,
+    and provider tag.
+    """
+    try:
+        hits = _web.web_search(query, n=n)
+        if not hits:
+            return f"[strategy=web_search] No hits for '{query}'."
+        lines = [f"[strategy=web_search] {len(hits)} hits for '{query}' (via {hits[0].get('source')}):"]
+        for i, h in enumerate(hits, 1):
+            lines.append(f"{i}. {h.get('title','')}")
+            lines.append(f"   URL: {h.get('url','')}")
+            sn = (h.get("snippet") or "").replace("\n", " ").strip()
+            if sn:
+                lines.append(f"   {sn[:240]}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"[strategy=web_search] ERROR: {e}"
+
+
+@tool
+def web_fetch(url: str, max_chars: int = 12000) -> str:
+    """
+    Fetch a single URL and return the main content as clean markdown.
+    Skips nav, footer, ads, scripts. Caps output at max_chars.
+    Use AFTER web_search to read the most promising hits.
+    """
+    try:
+        doc = _web.web_fetch(url, max_chars=max_chars)
+        if doc["status"] != "ok":
+            return f"[strategy=web_fetch] FAILED url={url} :: {doc['status']}"
+        return (
+            f"[strategy=web_fetch] OK url={url}\n"
+            f"Title: {doc['title']}\n"
+            f"Chars: {len(doc['markdown'])}\n\n"
+            f"{doc['markdown']}"
+        )
+    except Exception as e:
+        return f"[strategy=web_fetch] ERROR: {e}"
+
+
+@tool
+def github_repo_intel(slug_or_url: str, days: int = 30) -> str:
+    """
+    Pull a quick intel snapshot of a public GitHub repo:
+      meta (stars, forks, language, license, default_branch, topics, dates),
+      README (markdown, truncated to 16k chars),
+      recent commits on default branch over the last `days`,
+      top 15 open PRs.
+
+    Pass either a repo slug ('owner/name') or a github.com URL.
+    Use this BEFORE web_search when the user names a specific repo.
+    """
+    try:
+        intel = _web.github_repo_intel(slug_or_url, days=days)
+        if intel.get("status", "").startswith("error"):
+            return f"[strategy=github] {intel['status']}"
+        m = intel.get("meta", {})
+        lines = [
+            f"[strategy=github] slug={intel.get('slug')}",
+            f"  {m.get('name')} ({m.get('language')}, {m.get('license')})",
+            f"  stars={m.get('stars'):,}  forks={m.get('forks'):,}  watchers={m.get('watchers')}",
+            f"  open_issues={m.get('open_issues')}  default_branch={m.get('default_branch')}",
+            f"  topics: {', '.join(m.get('topics', []) or []) or '—'}",
+            f"  homepage: {m.get('homepage') or '—'}",
+            f"  pushed_at: {m.get('pushed_at')}",
+            "",
+            f"## README (first 8k chars)",
+            (intel.get("readme") or "")[:8000],
+            "",
+            f"## Recent commits ({len(intel.get('recent_commits') or [])} in last {intel.get('recent_commits_window_days', days)}d)",
+        ]
+        for c in (intel.get("recent_commits") or [])[:20]:
+            lines.append(f"  {c['sha']}  {c['date'][:10]}  {c['author']}: {c['message']}")
+        if intel.get("open_prs"):
+            lines.append("")
+            lines.append(f"## Open PRs (top {len(intel['open_prs'])})")
+            for pr in intel["open_prs"]:
+                lines.append(f"  #{pr['number']}  {pr['title']}  ({pr['user']}, updated {pr['updated_at'][:10]})")
+                lines.append(f"    {pr['url']}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"[strategy=github] ERROR: {e}"
+
+
+@tool
+def web_extract(urls: list[str], depth: str = "advanced") -> str:
+    """
+    Tavily-powered multi-URL extraction. Pass a list of URLs (up to ~20),
+    get clean text content for each in ONE call — faster + more reliable
+    than calling web_fetch multiple times. Best for JS-heavy pages,
+    GitHub blob views, LinkedIn posts, paywall previews.
+
+    depth: 'basic' (faster, cheaper) or 'advanced' (richer, slower).
+    Returns markdown with per-URL sections.
+    Requires TAVILY_API_KEY in .env.
+    """
+    if not urls:
+        return "[strategy=web_extract] No URLs provided."
+    try:
+        results = _web.tavily_extract(urls, depth=depth)
+        if not results:
+            return "[strategy=web_extract] Empty result. TAVILY_API_KEY missing or rate-limited."
+        lines = [f"[strategy=web_extract] {len(results)} URL(s) extracted (depth={depth}):"]
+        for r in results:
+            rc = r.get("raw_content", "") or ""
+            status = r.get("status", "ok")
+            lines.append(f"\n=== {r.get('url')} ({status}, {len(rc)} chars) ===")
+            if rc:
+                lines.append(rc[:6000] + ("\n…(truncated)" if len(rc) > 6000 else ""))
+        return "\n".join(lines)
+    except Exception as e:
+        return f"[strategy=web_extract] ERROR: {e}"
+
+
+@tool
+def web_crawl(
+    seed_url: str,
+    max_depth: int = 1,
+    max_breadth: int = 5,
+    limit: int = 8,
+    instructions: str = "",
+) -> str:
+    """
+    Tavily-powered crawl. Follow links from seed_url up to max_depth hops,
+    max_breadth links per page, collecting up to `limit` pages.
+    Optional `instructions` is a natural-language steer Tavily uses to
+    score which links to follow ('focus on documentation pages', 'skip
+    marketing copy', etc).
+
+    Use to map a site, gather all docs pages, or sweep a repo's blog +
+    related posts in one call. Returns per-page extracted content.
+    Requires TAVILY_API_KEY in .env.
+    """
+    if not seed_url:
+        return "[strategy=web_crawl] No seed URL provided."
+    try:
+        results = _web.tavily_crawl(
+            seed_url, max_depth=max_depth, max_breadth=max_breadth,
+            limit=limit, instructions=instructions or None,
+        )
+        if not results:
+            return f"[strategy=web_crawl] No pages crawled from {seed_url}. TAVILY_API_KEY missing or rate-limited."
+        lines = [f"[strategy=web_crawl] {len(results)} page(s) from {seed_url} "
+                 f"(depth={max_depth}, breadth={max_breadth}):"]
+        if instructions:
+            lines.append(f"  instructions: {instructions[:120]}")
+        for r in results:
+            rc = r.get("raw_content", "") or ""
+            lines.append(f"\n=== {r.get('url')} ({len(rc)} chars) ===")
+            if rc:
+                lines.append(rc[:4000] + ("\n…(truncated)" if len(rc) > 4000 else ""))
+        return "\n".join(lines)
+    except Exception as e:
+        return f"[strategy=web_crawl] ERROR: {e}"
+
+
+@tool
+def reddit_search(query: str, subreddit: str = "", n: int = 15) -> str:
+    """
+    Search Reddit. Optional `subreddit` narrows to one sub (e.g. 'muapi',
+    'LocalLLaMA', 'StableDiffusion'). Returns posts with score, comments,
+    permalink, and body snippet. No auth; uses public JSON endpoint.
+    """
+    try:
+        sub = (subreddit or "").strip() or None
+        posts = _web.reddit_search(query, subreddit=sub, n=n)
+        if not posts:
+            return f"[strategy=reddit] No hits for '{query}'" + (f" in r/{sub}" if sub else "")
+        lines = [f"[strategy=reddit] {len(posts)} posts for '{query}'" + (f" in r/{sub}" if sub else "") + ":"]
+        for i, p in enumerate(posts, 1):
+            lines.append(f"{i}. [{p['score']:>4}↑ {p['num_comments']:>3}💬] r/{p['subreddit']} — {p['title']}")
+            lines.append(f"   {p['url']}")
+            if p.get("external_url") and p["external_url"] != p["url"]:
+                lines.append(f"   → {p['external_url']}")
+            if p.get("body_snippet"):
+                lines.append(f"   {p['body_snippet']}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"[strategy=reddit] ERROR: {e}"
+
+
 ALL_TOOLS = [
     search_semantic,
     search_by_category,
@@ -448,4 +645,11 @@ ALL_TOOLS = [
     get_bookmark_full,
     get_stats,
     run_cypher,
+    # Web research
+    web_search,
+    web_fetch,
+    web_extract,
+    web_crawl,
+    github_repo_intel,
+    reddit_search,
 ]
