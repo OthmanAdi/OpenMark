@@ -16,6 +16,7 @@ The 12 tools (typed Pydantic returns) cover:
 Memory: MemorySaver checkpointer keyed by thread_id.
 """
 
+import re
 import time
 from typing import Any
 from langchain.agents import create_agent
@@ -32,7 +33,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from openmark import config
 from openmark.agent.llms import build_executor, build_classifier
-from openmark.agent.tools import ALL_TOOLS
+from openmark.agent.tools import ALL_TOOLS, warm_up as _warm_up_tools
 from openmark.agent.middleware import (
     OpenMarkSkillMiddleware,
     slash_skill_loader,
@@ -40,6 +41,7 @@ from openmark.agent.middleware import (
     drain_events,
     log,
 )
+from openmark.agent import skills as _skill_loader
 
 
 # ── Lazy classifier ───────────────────────────────────────────────────────────
@@ -105,18 +107,97 @@ OUTPUT FORMAT
 """
 
 
+# ── Mode classification ──────────────────────────────────────────────────────
+# Slash command → mode lookup. The skill name carries the user's intent, so we
+# can skip the classifier LLM call entirely when slash is used. ~150-400ms saved
+# per slash query on the first turn.
+_SLASH_TO_MODE: dict[str, str] = {
+    "fast-search":     "fast",
+    "deep-research":   "deep",
+    "newsletter":      "newsletter",
+    "weekly-digest":   "digest",
+    "bookmark-dive":   "dive",
+    "repo-research":   "deep",
+    "newsletter-essay":      "newsletter",
+    "newsletter-roundup":    "newsletter",
+    "newsletter-thread":     "newsletter",
+    "newsletter-comparison": "newsletter",
+}
+
+# Regex pre-classifier — catches the easy 80% so the LLM only handles ambiguous
+# queries. Patterns derived from the labels in CLASSIFIER_PROMPT below.
+_URL_RE = re.compile(r"\bhttps?://\S+", re.IGNORECASE)
+_DIVE_VERBS = re.compile(r"\b(expand|dig\s+into|neighbors\s+of|related\s+to|dive\s+into)\b", re.IGNORECASE)
+_NEWSLETTER_RE = re.compile(r"\bnewsletter\b", re.IGNORECASE)
+_DIGEST_RE = re.compile(
+    r"\b(this\s+week|last\s+\d+\s*(day|week)s?|past\s+\d+\s*days?|"
+    r"weekly|yesterday|today|recap)\b",
+    re.IGNORECASE,
+)
+_DEEP_RE = re.compile(
+    r"\b(research|compare|comparison|landscape|deep[-\s]?dive|"
+    r"overview|state\s+of|survey|map\s+out)\b",
+    re.IGNORECASE,
+)
+
+
+def _heuristic_mode(text: str) -> str | None:
+    t = (text or "").strip()
+    if not t:
+        return None
+    if _URL_RE.search(t) and _DIVE_VERBS.search(t):
+        return "dive"
+    if _NEWSLETTER_RE.search(t):
+        return "newsletter"
+    if _DIGEST_RE.search(t):
+        return "digest"
+    if _DEEP_RE.search(t):
+        return "deep"
+    return None
+
+
+def _slash_mode(text: str) -> str | None:
+    """If text starts with /<skill>, map skill → mode. Returns None on no match."""
+    name, _ = _skill_loader.parse_slash(text or "")
+    if not name:
+        return None
+    short = name.lower().lstrip("/")
+    if short.startswith("openmark-"):
+        short = short[len("openmark-"):]
+    return _SLASH_TO_MODE.get(short)
+
+
 # ── Custom middleware ─────────────────────────────────────────────────────────
+
+_STATS_MARKER = "<!-- openmark-stats-injected -->"
+
 
 @before_model
 def inject_live_stats(state: AgentState, runtime: Any) -> dict | None:
     """
     On the first turn:
-      1. Run the cheap classifier (gpt-5-mini) to pick a mode label.
+      1. Pick a mode (slash → heuristic regex → LLM classifier fallback).
       2. Rewrite the system prompt with live Neo4j counts AND the mode hint.
+
+    Idempotent: a sentinel marker in the injected SystemMessage prevents
+    re-injection on subsequent turns and lets us co-exist with the slash
+    pre-loader (which also injects a SystemMessage).
     """
     messages = state.get("messages") or []
-    if not messages or any(m.type == "system" for m in messages if hasattr(m, "type")):
+    if not messages:
         return None
+
+    # Already injected? Check our marker in any existing system message.
+    for m in messages:
+        if getattr(m, "type", "") != "system":
+            continue
+        content = getattr(m, "content", "")
+        if isinstance(content, str) and _STATS_MARKER in content:
+            return None
+        if isinstance(content, list):
+            for b in content:
+                if isinstance(b, dict) and _STATS_MARKER in (b.get("text", "") or ""):
+                    return None
 
     # Pull the user's first user message text for classification
     last_user_text = ""
@@ -129,23 +210,30 @@ def inject_live_stats(state: AgentState, runtime: Any) -> dict | None:
                 )
             break
 
-    # Cheap classification — fall back to "fast" on any error
-    mode = "fast"
-    try:
-        if last_user_text.strip():
-            t0 = time.time()
-            cls_resp = _get_classifier().invoke(CLASSIFIER_PROMPT.format(query=last_user_text.strip()))
-            raw = (cls_resp.content if hasattr(cls_resp, "content") else str(cls_resp))
-            if isinstance(raw, list):
-                raw = " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in raw)
-            raw = str(raw).strip().lower()
-            for cand in ("newsletter", "digest", "deep", "dive", "fast"):
-                if cand in raw:
-                    mode = cand
-                    break
-            log.info(f"[classifier] mode={mode} (raw={raw[:60]!r}) in {round((time.time()-t0)*1000,1)}ms")
-    except Exception as e:
-        log.info(f"[classifier] failed: {e}; defaulting mode=fast")
+    # Pick a mode. Cheap paths first; LLM classifier only when nothing else fires.
+    mode = _slash_mode(last_user_text) or _heuristic_mode(last_user_text)
+    classifier_source = "slash" if _slash_mode(last_user_text) else ("heuristic" if mode else "")
+
+    if mode is None:
+        mode = "fast"
+        try:
+            if last_user_text.strip():
+                t0 = time.time()
+                cls_resp = _get_classifier().invoke(CLASSIFIER_PROMPT.format(query=last_user_text.strip()))
+                raw = (cls_resp.content if hasattr(cls_resp, "content") else str(cls_resp))
+                if isinstance(raw, list):
+                    raw = " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in raw)
+                raw = str(raw).strip().lower()
+                for cand in ("newsletter", "digest", "deep", "dive", "fast"):
+                    if cand in raw:
+                        mode = cand
+                        break
+                classifier_source = "llm"
+                log.info(f"[classifier] mode={mode} (raw={raw[:60]!r}) in {round((time.time()-t0)*1000,1)}ms")
+        except Exception as e:
+            log.info(f"[classifier] failed: {e}; defaulting mode=fast")
+    else:
+        log.info(f"[classifier] mode={mode} (source={classifier_source}, no LLM call)")
 
     try:
         from openmark.stores import neo4j_store
@@ -159,7 +247,7 @@ def inject_live_stats(state: AgentState, runtime: Any) -> dict | None:
     except Exception:
         prompt = SYSTEM_PROMPT_TEMPLATE.format(bookmarks=13000, tags=5000, categories=19, communities=0)
 
-    prompt += f"\n\nMODE: {mode}  (classifier set this; tailor your effort accordingly)\n"
+    prompt += f"\n\n{_STATS_MARKER}\nMODE: {mode}  (classifier set this; tailor your effort accordingly)\n"
     if mode == "fast":
         prompt += "- Single tool call. Render results in 10 seconds. No graph_expand, no Cypher.\n"
     elif mode == "deep":
@@ -180,6 +268,13 @@ def inject_live_stats(state: AgentState, runtime: Any) -> dict | None:
 
 def build_agent():
     """Compile the agent graph with the configured provider + middleware stack."""
+    # Pre-load embedder weights + Neo4j driver + stats cache so the first user
+    # query doesn't pay model-load and connection-handshake latency. Failures
+    # are non-fatal and surfaced again when the first real call retries.
+    _t_warm = time.time()
+    _warm_up_tools()
+    log.info(f"[warm_up] tools warmed in {round((time.time()-_t_warm)*1000)}ms")
+
     llm = build_executor()
     provider = (getattr(config, "AGENT_PROVIDER", "azure") or "azure").lower()
     if provider == "local":
@@ -210,15 +305,18 @@ def build_agent():
             bookmarks=11000, tags=5000, categories=19, communities=0,
         ),
         middleware=[
-            # 1. Slash-command pre-loader: if user typed `/<skill>`, eager-inject the
+            # 1. Live KB stats + mode hint. Runs FIRST so it can read the raw
+            #    user message (including any leading `/skill-name`) to pick the
+            #    mode via slash → heuristic → LLM classifier waterfall before
+            #    slash_skill_loader rewrites the message.
+            inject_live_stats,
+            # 2. Slash-command pre-loader: if user typed `/<skill>`, eager-inject the
             #    SKILL.md body as a SystemMessage and strip the slash from their query.
             slash_skill_loader,
-            # 2. Skill catalogue (progressive disclosure) — registers `load_skill` tool
+            # 3. Skill catalogue (progressive disclosure) — registers `load_skill` tool
             #    and appends the skill list to every system prompt so the agent can
             #    self-select recipes when the user didn't use a slash command.
             OpenMarkSkillMiddleware(),
-            # 3. Live KB stats + classifier mode hint.
-            inject_live_stats,
             # 4. Built-in planner — the agent writes its own todo list as the first action.
             TodoListMiddleware(),
             # 5. Auto-compaction: once history crosses 8k tokens or 30 messages,

@@ -8,6 +8,7 @@ validate citations against state["seen_urls"].
 
 import re
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from langchain_core.tools import tool
 from openmark.embeddings.factory import get_embedder
 from openmark.stores import neo4j_store
@@ -20,6 +21,35 @@ def _get_embedder():
     if _embedder is None:
         _embedder = get_embedder()
     return _embedder
+
+
+# Cache query embeddings — pplx-embed query model is deterministic, so the same
+# text always produces the same vector. Vague queries ("rag", "agents") repeat
+# across turns and tool fan-outs; caching saves 100-500ms per repeat call.
+@lru_cache(maxsize=512)
+def _embed_query_tuple(query: str) -> tuple[float, ...]:
+    return tuple(_get_embedder().embed_query(query))
+
+
+def _embed_query(query: str) -> list[float]:
+    return list(_embed_query_tuple(query))
+
+
+def warm_up() -> None:
+    """
+    Pre-load embedder weights, open the Neo4j driver, and prime the stats cache
+    before the first user query. Called once from build_agent(). Failures are
+    non-fatal — first real call will pay the cost and surface the same error.
+    """
+    try:
+        _embed_query("warm")
+    except Exception as e:
+        print(f"[warm_up] embedder skipped: {e}")
+    try:
+        neo4j_store.get_driver()
+        neo4j_store.get_stats()
+    except Exception as e:
+        print(f"[warm_up] neo4j skipped: {e}")
 
 
 def _row_to_hit(r: dict) -> BookmarkHit:
@@ -45,7 +75,7 @@ def search_semantic(query: str, n: int = 10) -> str:
     Returns up to n hits ranked by cosine similarity to the query embedding.
     """
     try:
-        q_embed = _get_embedder().embed_query(query)
+        q_embed = _embed_query(query)
         rows = neo4j_store.vector_search(q_embed, n=n)
         hits = [_row_to_hit(r) for r in rows]
         return ToolResult(
@@ -69,7 +99,7 @@ def search_by_category(category: str, query: str = "", n: int = 15) -> str:
     Pass an empty query to get the top-scored bookmarks in the category.
     """
     try:
-        q_embed = _get_embedder().embed_query(query or category)
+        q_embed = _embed_query(query or category)
         rows = neo4j_store.vector_search(q_embed, n=n, category=category)
         hits = [_row_to_hit(r) for r in rows]
         return ToolResult(
@@ -89,7 +119,7 @@ def search_by_community(query: str, n: int = 20) -> str:
     returns the global top-n.
     """
     try:
-        q_embed = _get_embedder().embed_query(query)
+        q_embed = _embed_query(query)
         rows = neo4j_store.search_by_community(q_embed, n=n)
         hits = [_row_to_hit(r) for r in rows]
         note = "" if hits else "Louvain not run yet (GDS plugin?) — try search_semantic."
@@ -191,7 +221,7 @@ def find_by_source(source: str, query: str = "", n: int = 20) -> str:
     """
     try:
         if query.strip():
-            q_embed = _get_embedder().embed_query(query)
+            q_embed = _embed_query(query)
             rows = neo4j_store.vector_search(q_embed, n=n, source=source)
         else:
             rows = neo4j_store.query("""
@@ -219,7 +249,7 @@ def search_linkedin(query: str, n: int = 15) -> str:
 def search_youtube(query: str, n: int = 15) -> str:
     """Semantic search across YouTube saves (liked + watch_later + playlists)."""
     try:
-        q_embed = _get_embedder().embed_query(query)
+        q_embed = _embed_query(query)
         rows = neo4j_store.query("""
             CALL () {
                 MATCH (b)
@@ -260,7 +290,7 @@ def find_recent(days: int = 7, query: str = "", n: int = 25) -> str:
     try:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         if query.strip():
-            q_embed = _get_embedder().embed_query(query)
+            q_embed = _embed_query(query)
             rows = neo4j_store.query("""
                 MATCH (b)
                   SEARCH b IN (
@@ -306,7 +336,7 @@ def search_by_date_range(from_iso: str, to_iso: str, query: str = "", n: int = 3
     """
     try:
         if query.strip():
-            q_embed = _get_embedder().embed_query(query)
+            q_embed = _embed_query(query)
             rows = neo4j_store.query("""
                 MATCH (b)
                   SEARCH b IN (

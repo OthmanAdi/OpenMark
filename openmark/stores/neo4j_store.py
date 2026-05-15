@@ -9,6 +9,7 @@ semantic + graph-structure search in a single Cypher query.
 """
 
 import re
+import time
 import atexit
 from urllib.parse import urlparse
 from neo4j import GraphDatabase
@@ -17,6 +18,12 @@ from openmark import config
 # Singleton driver — Neo4j drivers are thread-safe and pool connections internally.
 # Opening one driver per call hammers auth and triggers AuthenticationRateLimit.
 _DRIVER = None
+
+# Stats are touched on every conversation start by the agent's @before_model
+# hook. The KB grows on a minute-scale, not second-scale, so a 60s TTL keeps
+# the prompt accurate while skipping ~50-100ms of Cypher per session start.
+_STATS_CACHE_TTL = 60.0
+_STATS_CACHE: dict = {"data": None, "ts": 0.0}
 
 
 def get_driver():
@@ -396,6 +403,10 @@ def query(cypher: str, params: dict | None = None) -> list[dict]:
 
 
 def get_stats() -> dict:
+    now = time.time()
+    cached = _STATS_CACHE["data"]
+    if cached is not None and now - _STATS_CACHE["ts"] < _STATS_CACHE_TTL:
+        return cached
     rows = query("""
         MATCH (b:Bookmark) WITH count(b) AS bookmarks
         OPTIONAL MATCH (t:Tag)       WITH bookmarks, count(t) AS tags
@@ -403,7 +414,10 @@ def get_stats() -> dict:
         OPTIONAL MATCH (comm:Community) WITH bookmarks, tags, categories, count(comm) AS communities
         RETURN bookmarks, tags, categories, communities
     """)
-    return rows[0] if rows else {}
+    data = rows[0] if rows else {}
+    _STATS_CACHE["data"] = data
+    _STATS_CACHE["ts"] = now
+    return data
 
 
 # Legacy helpers (kept for agent tool fallback)
