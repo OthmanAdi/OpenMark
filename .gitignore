@@ -49,10 +49,14 @@ skills-lock.json
 
 # ── Claude Code internal state ────────────────────────────────
 .claude/*
-# but DO commit project-specific OpenMark skills:
+# but DO commit project-specific OpenMark skills + humanizer drop-ins +
+# agent-generated skills so the composer's sub-agents see the same set on a
+# fresh clone:
 !.claude/skills/
 .claude/skills/*
 !.claude/skills/openmark-*/
+!.claude/skills/humanizer-*/
+!.claude/skills/agent-generated-*/
 
 # ── Newsletter drafts (personal) ─────────────────────────────
 drafts/

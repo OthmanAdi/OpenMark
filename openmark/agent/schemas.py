@@ -4,10 +4,19 @@ Pydantic schemas for OpenMark agent — typed tool returns + grounded answers.
 Why: returning Pydantic instead of markdown forces URLs to live in named
 fields. The LLM can't fabricate them at synthesis time because the
 validator can check every cited URL against state["seen_urls"].
+
+Two layers:
+  - retrieval shapes (BookmarkHit, ToolResult) — what tools return to the agent
+  - composer shapes (LinkedInPost, NewsletterEssay, ...) — what the composer
+    sub-agent emits via response_format=ToolStrategy(<Model>). These are the
+    contracts the verifier sub-agent grades and the export layer renders.
 """
 
 from typing import Literal
 from pydantic import BaseModel, Field
+
+# Languages humanizer-semitic + polisher pipeline supports today.
+PostLanguage = Literal["en", "ar-msa", "ar-egt", "ar-shami", "he"]
 
 
 Strategy = Literal[
@@ -153,3 +162,220 @@ class Report(BaseModel):
         default_factory=list,
         description="0-3 concrete follow-up questions the user could ask next.",
     )
+
+
+# ── Composer output shapes (v2 newsletter mission) ───────────────────────────
+#
+# Each shape carries the SAME `sources` rule: every URL must have appeared
+# in a researcher tool result this turn. The verifier sub-agent grades that.
+
+class PostSource(BaseModel):
+    """A source attached to a composer output. URL must come from a tool result."""
+    url: str = Field(description="MUST appear verbatim in a researcher tool result this turn.")
+    title: str = Field(description="Title from the tool result.")
+    note: str = Field(default="", description="One short phrase on what this source contributes.")
+
+
+class LinkedInPost(BaseModel):
+    """
+    Phone-readable LinkedIn / X / short-post output.
+    250-400 words, ONE link in body, no hashtags.
+    Matches openmark-newsletter-thread skill rules.
+    """
+    hook: str = Field(
+        min_length=20, max_length=140,
+        description="Opening claim, 6-10 words. NO question mark.",
+    )
+    body_paragraphs: list[str] = Field(
+        min_length=4, max_length=6,
+        description="4-6 short paragraphs. Each 1-3 sentences. NO bullet lists.",
+    )
+    closer: str = Field(
+        min_length=10, max_length=180,
+        description="One sentence. Quotable. NOT a question.",
+    )
+    anchor_url: str = Field(
+        description="The single inline link in the body. MUST match the one entry in `sources`.",
+    )
+    sources: list[PostSource] = Field(
+        min_length=1, max_length=1,
+        description="Exactly one anchor source.",
+    )
+    word_count: int = Field(ge=180, le=420)
+    language: PostLanguage = "en"
+    humanizer_applied: bool = False
+    voice_check: Literal["pass", "warn"] = "pass"
+
+
+class EssaySection(BaseModel):
+    heading: str = Field(
+        description="Sub-claim phrasing, NOT a topic name. Headline style, no trailing punctuation.",
+    )
+    body_markdown: str = Field(
+        description="3-6 sentences. Inline links allowed. NO bullet lists in the body.",
+    )
+
+
+class NewsletterEssay(BaseModel):
+    """
+    Single-thesis long-form essay. 600-900 words.
+    Matches openmark-newsletter-essay skill rules.
+    `counter` section is mandatory.
+    """
+    title: str = Field(max_length=64)
+    thesis: str = Field(
+        min_length=20, max_length=240,
+        description="One sentence. The whole essay defends or develops this.",
+    )
+    opening_paragraph: str
+    sections: list[EssaySection] = Field(min_length=3, max_length=5)
+    counter: str = Field(
+        min_length=80,
+        description="Mandatory: the strongest objection, then a sharpened response.",
+    )
+    closing_paragraph: str
+    sources: list[PostSource] = Field(min_length=5, max_length=8)
+    word_count: int = Field(ge=550, le=950)
+    language: PostLanguage = "en"
+    humanizer_applied: bool = False
+
+
+class RoundupItem(BaseModel):
+    title: str
+    url: str
+    domain: str = Field(description="Just the domain, no scheme, no path. e.g. 'github.com'.")
+    so_what: str = Field(
+        min_length=10, max_length=200,
+        description="One sentence on why this matters. No 'this could be useful'.",
+    )
+
+
+class RoundupBucket(BaseModel):
+    name: str = Field(
+        description="Bucket name from the skill list (Models & research, Tooling & open source, ...).",
+    )
+    items: list[RoundupItem] = Field(min_length=2, max_length=5)
+
+
+class NewsletterRoundup(BaseModel):
+    """
+    Categorical news-roundup. Bucketed. 3-6 buckets, 2-5 items per bucket.
+    Matches openmark-newsletter-roundup skill rules.
+    """
+    title: str = Field(max_length=80)
+    pulse: str = Field(
+        min_length=20, max_length=200,
+        description="One sentence pulse on the week. The hook.",
+    )
+    buckets: list[RoundupBucket] = Field(min_length=3, max_length=6)
+    sources: list[PostSource] = Field(min_length=6, max_length=24)
+    item_count: int = Field(ge=6, le=30)
+    window_label: str = Field(
+        description="Human-readable window. e.g. 'last 7 days', 'May 8-14'.",
+    )
+    language: PostLanguage = "en"
+
+
+class ComparisonRow(BaseModel):
+    dimension: str = Field(
+        description="What this row compares (License, Cost, DX, Lock-in, Best at, Worst at, ...).",
+    )
+    values: list[str] = Field(
+        min_length=2, max_length=5,
+        description="Values for each item in `items`. Must match items length.",
+    )
+
+
+class ComparisonPick(BaseModel):
+    item_name: str
+    condition: str = Field(description="The single condition that picks this item.")
+    rationale: str = Field(description="1-2 sentences with one inline cite.")
+
+
+class NewsletterComparison(BaseModel):
+    """
+    Side-by-side comparison newsletter.
+    Matches openmark-newsletter-comparison skill rules.
+    Table is mandatory.
+    """
+    title: str = Field(max_length=80)
+    recommendation: str = Field(
+        min_length=20, max_length=240,
+        description="Blockquote line: who wins for what.",
+    )
+    items: list[str] = Field(min_length=2, max_length=5)
+    rows: list[ComparisonRow] = Field(min_length=4, max_length=8)
+    how_to_read: str
+    picks: list[ComparisonPick] = Field(min_length=2, max_length=5)
+    sources: list[PostSource] = Field(min_length=3, max_length=12)
+    language: PostLanguage = "en"
+
+
+class NewsletterAnalytical(BaseModel):
+    """
+    Punchy analytical newsletter, 600-900 words, with a 'What I'm reading' spine.
+    Matches openmark-newsletter (primary) skill rules.
+    """
+    title: str = Field(max_length=80)
+    hook: str = Field(
+        min_length=20, max_length=240,
+        description="1-2 sentence hook stating the thesis.",
+    )
+    what_happened_paragraphs: list[str] = Field(
+        min_length=3, max_length=5,
+        description="Each paragraph cites at least one URL inline.",
+    )
+    why_it_matters: str = Field(
+        min_length=80,
+        description="1-2 paragraphs. The take.",
+    )
+    what_im_reading: list[RoundupItem] = Field(min_length=5, max_length=7)
+    one_more_thing: str | None = Field(
+        default=None,
+        description="Optional weird/funny bookmark that doesn't fit the thesis.",
+    )
+    sources: list[PostSource] = Field(min_length=5, max_length=15)
+    word_count: int = Field(ge=550, le=950)
+    language: PostLanguage = "en"
+
+
+# ── Verifier output shape ─────────────────────────────────────────────────────
+
+VerifierCheck = Literal["pass", "fail"]
+
+
+class VerificationReport(BaseModel):
+    """
+    Verifier sub-agent output. The orchestrator branches on `overall_passed`.
+    Score = (count of 'pass') / 4 across the four checks. >=0.9 is the bar.
+    """
+    cite_check: VerifierCheck
+    cite_fail_reason: str = ""
+    voice_check: VerifierCheck
+    voice_fail_reason: str = ""
+    word_count_check: VerifierCheck
+    word_count_fail_reason: str = ""
+    schema_check: VerifierCheck
+    schema_fail_reason: str = ""
+    overall_passed: bool
+    score: float = Field(
+        ge=0.0, le=1.0,
+        description="(count_of_pass) / 4. >= 0.90 is the project target.",
+    )
+    fix_instructions: str = Field(
+        default="",
+        description="If overall_passed=False, exact instructions for the composer to retry.",
+    )
+
+
+# Convenient registry for the composer factory + the export layer.
+ComposerFormat = Literal["linkedin", "thread", "essay", "roundup", "comparison", "analytical"]
+
+COMPOSER_SCHEMAS: dict[ComposerFormat, type[BaseModel]] = {
+    "linkedin":   LinkedInPost,
+    "thread":     LinkedInPost,        # alias — the thread skill IS a LinkedIn post
+    "essay":      NewsletterEssay,
+    "roundup":    NewsletterRoundup,
+    "comparison": NewsletterComparison,
+    "analytical": NewsletterAnalytical,
+}

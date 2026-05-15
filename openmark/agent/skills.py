@@ -27,7 +27,14 @@ from typing import Optional
 SKILLS_DIR = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", ".claude", "skills")
 )
-SKILL_PREFIX = "openmark-"
+# The composer agent uses three skill families:
+#   openmark-*        — OpenMark-curated retrieval / composition recipes
+#   humanizer-*       — humanizer-semitic (Arabic + Hebrew) drop-ins
+#   agent-generated-* — skills the agent writes itself via the write_skill tool
+# Anything outside these prefixes belongs to Claude Code or another plugin
+# and must be ignored here.
+SKILL_PREFIXES: tuple[str, ...] = ("openmark-", "humanizer-", "agent-generated-")
+SKILL_PREFIX = "openmark-"  # kept for backward-compat with slash dispatch
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)", re.DOTALL)
 _FIELD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):\s*(.+?)\s*$", re.MULTILINE)
@@ -59,14 +66,22 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
     return fm, body
 
 
+def _strip_known_prefix(entry: str) -> str:
+    """Strip the FIRST matching skill prefix; preserves the rest verbatim."""
+    for p in SKILL_PREFIXES:
+        if entry.startswith(p):
+            return entry[len(p):]
+    return entry
+
+
 @lru_cache(maxsize=1)
 def _scan() -> list[dict]:
-    """Discover all openmark-* skills on disk. Cached for the process lifetime."""
+    """Discover skills with one of SKILL_PREFIXES on disk. Cached for the process lifetime."""
     out: list[dict] = []
     if not os.path.isdir(SKILLS_DIR):
         return out
     for entry in sorted(os.listdir(SKILLS_DIR)):
-        if not entry.startswith(SKILL_PREFIX):
+        if not any(entry.startswith(p) for p in SKILL_PREFIXES):
             continue
         skill_md = os.path.join(SKILLS_DIR, entry, "SKILL.md")
         if not os.path.isfile(skill_md):
@@ -79,11 +94,13 @@ def _scan() -> list[dict]:
         fm, body = _parse_frontmatter(text)
         out.append({
             "name": fm.get("name", entry),
-            "short_name": entry[len(SKILL_PREFIX):],   # e.g. "fast-search"
+            # short_name strips the family prefix so the slash + UI labels stay clean.
+            "short_name": _strip_known_prefix(entry),
             "description": fm.get("description", "")[:240],
             "type": (fm.get("metadata") or {}).get("type", "skill"),
             "body": body.strip(),
             "path": skill_md,
+            "family": next((p.rstrip("-") for p in SKILL_PREFIXES if entry.startswith(p)), "skill"),
         })
     return out
 

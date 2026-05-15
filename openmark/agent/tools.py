@@ -683,3 +683,93 @@ ALL_TOOLS = [
     github_repo_intel,
     reddit_search,
 ]
+
+
+# ── Skill self-authoring ─────────────────────────────────────────────────────
+# The orchestrator can write a new skill at runtime and use it on the same
+# turn. Sandbox: writes are confined to .claude/skills/agent-generated/<name>/
+# Cap: 5 successful writes per process. Anything more is the model spamming.
+
+import os as _os
+import re as _re
+from openmark.agent import skills as _skill_loader
+
+_AGENT_SKILL_ROOT = _os.path.join(_skill_loader.SKILLS_DIR, "agent-generated-")
+_SKILL_NAME_RE = _re.compile(r"^[a-z0-9][a-z0-9-]{1,48}$")
+_SKILL_WRITE_CAP = 5
+_skill_writes_this_session: list[str] = []
+
+
+@tool
+def write_skill(name: str, description: str, body: str) -> str:
+    """
+    Author a new skill at runtime that the orchestrator can immediately load.
+
+    Sandbox: writes go to .claude/skills/agent-generated-<name>/SKILL.md ONLY.
+    Cannot overwrite curated openmark-* or humanizer-* skills.
+    Cap: 5 successful writes per process. Returns the loaded short_name on success.
+
+    Args:
+        name:        short kebab-case name, e.g. "linkedin-hook-rewrite". 2-50 chars,
+                     [a-z0-9-]. Final on-disk dir is "agent-generated-<name>".
+        description: one-line summary, max 240 chars. Goes into frontmatter for
+                     the orchestrator's skill catalogue.
+        body:        Markdown body of the SKILL.md after the frontmatter block.
+                     Must be plain instructions, no shell commands, no secrets.
+    """
+    if not isinstance(name, str) or not _SKILL_NAME_RE.match(name):
+        return ("[write_skill] BLOCKED: invalid name. Use kebab-case [a-z0-9-], "
+                "2-50 chars, no leading digit-only.")
+    if name.startswith("openmark-") or name.startswith("humanizer-") or name.startswith("agent-generated-"):
+        return "[write_skill] BLOCKED: do not prefix the name yourself; the sandbox prefixes it."
+    if len(_skill_writes_this_session) >= _SKILL_WRITE_CAP:
+        return (f"[write_skill] BLOCKED: session cap {_SKILL_WRITE_CAP} reached. "
+                f"Skills written this session: {_skill_writes_this_session}")
+
+    description = (description or "").strip()
+    if not description:
+        return "[write_skill] BLOCKED: description is required."
+    if len(description) > 240:
+        description = description[:237] + "..."
+
+    body = (body or "").strip()
+    if not body:
+        return "[write_skill] BLOCKED: body is required."
+
+    target_dir = f"{_AGENT_SKILL_ROOT}{name}"
+    target_md = _os.path.join(target_dir, "SKILL.md")
+    if _os.path.exists(target_md):
+        return f"[write_skill] BLOCKED: skill 'agent-generated-{name}' already exists. Pick a different name."
+
+    full = (
+        "---\n"
+        f"name: agent-generated-{name}\n"
+        f"description: {description}\n"
+        "metadata:\n"
+        "  type: agent-generated\n"
+        "---\n\n"
+        f"{body}\n"
+    )
+
+    try:
+        _os.makedirs(target_dir, exist_ok=False)
+        with open(target_md, "w", encoding="utf-8") as f:
+            f.write(full)
+    except FileExistsError:
+        return f"[write_skill] BLOCKED: directory '{target_dir}' already exists."
+    except Exception as e:
+        return f"[write_skill] ERROR writing skill: {e}"
+
+    _skill_loader.reload_skills()
+    _skill_writes_this_session.append(name)
+    return (f"[write_skill] OK — agent-generated-{name} created at {target_md}. "
+            f"Loadable now via load_skill('{name}'). "
+            f"({len(_skill_writes_this_session)}/{_SKILL_WRITE_CAP} this session)")
+
+
+def reset_write_skill_quota() -> None:
+    """Test helper. Clears the session quota counter."""
+    _skill_writes_this_session.clear()
+
+
+ALL_TOOLS.append(write_skill)

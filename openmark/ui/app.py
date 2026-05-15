@@ -1149,6 +1149,308 @@ def build_ui():
                     show_progress="full",
                 )
 
+            # ── Tab 6: Compose (multi-agent orchestrator) ─────────────────
+            with gr.Tab("Compose ✨"):
+                gr.HTML("""
+                <div style='color:#64748b;font-size:0.83em;padding:4px 0 8px'>
+                  Multi-agent orchestrator — researcher → composer →
+                  polisher/humanizer → verifier. Reuses the same live tool-card
+                  stream as Chat. Output is rendered as Markdown plus a
+                  LinkedIn-paste plaintext and an HTML variant.
+                </div>""")
+                _compose_agent = {"_": None}    # lazy-built on first compose
+                _compose_thread_counter = {"n": 0}
+
+                with gr.Row():
+                    compose_brief = gr.Textbox(
+                        placeholder=(
+                            "Topic + angle. e.g. 'Compose a LinkedIn post on RAG retrieval "
+                            "tradeoffs, vector vs graph. Pull from my saved bookmarks.'"
+                        ),
+                        label="Brief",
+                        lines=4,
+                        scale=4,
+                    )
+                    with gr.Column(scale=1):
+                        compose_format = gr.Dropdown(
+                            ["linkedin", "thread", "analytical", "essay", "roundup", "comparison"],
+                            value="linkedin",
+                            label="Format",
+                        )
+                        compose_lang = gr.Dropdown(
+                            ["en", "ar-msa", "ar-egt", "ar-shami", "he"],
+                            value="en",
+                            label="Language",
+                        )
+                        compose_btn = gr.Button("Compose ✨", variant="primary")
+
+                compose_events = gr.HTML(
+                    value="<p style='color:#475569;padding:8px'>Live sub-agent + tool activity will stream here.</p>",
+                    label="Live activity",
+                )
+                with gr.Tabs():
+                    with gr.Tab("Markdown (auto-saves)"):
+                        compose_md = gr.Markdown()
+                    with gr.Tab("LinkedIn plaintext (paste-ready)"):
+                        compose_plain = gr.Textbox(lines=20, show_copy_button=True)
+                    with gr.Tab("LinkedIn HTML (paste as rich)"):
+                        compose_html = gr.Code(language="html", lines=20)
+
+                def _compose_fn(brief: str, format_name: str, language: str):
+                    """One-shot compose run. Returns (events_html, markdown, plaintext, html)."""
+                    if not brief or not brief.strip():
+                        return "<p style='color:#f97316;padding:8px'>Enter a brief above.</p>", "", "", ""
+                    if _compose_agent["_"] is None:
+                        try:
+                            from openmark.composer.orchestrator import build_composer_orchestrator
+                            _compose_agent["_"] = build_composer_orchestrator()
+                        except Exception as e:
+                            return (
+                                f"<p style='color:#ef4444;padding:8px'>Composer build failed: {e}</p>",
+                                "", "", "",
+                            )
+                    _compose_thread_counter["n"] += 1
+                    thread_id = f"compose-{_compose_thread_counter['n']}"
+
+                    enriched = (
+                        f"Format: {format_name}\nLanguage: {language}\n\n"
+                        f"Brief: {brief.strip()}\n\n"
+                        f"Pick the matching composer sub-agent for format `{format_name}`. "
+                        f"Pull anchors from OpenMark first via the researcher. "
+                        f"Language is `{language}` — if Arabic or Hebrew, route through the humanizer; "
+                        f"if English, route through the polisher. Then verify. "
+                        f"Return the final composer Pydantic instance."
+                    )
+
+                    from openmark.agent.middleware import drain_events
+                    drain_events(thread_id)
+
+                    events: list[str] = []
+                    structured = None
+                    final_text = ""
+                    try:
+                        cfg = {"configurable": {"thread_id": thread_id}}
+                        for chunk in _compose_agent["_"].stream(
+                            {"messages": [{"role": "user", "content": enriched}]},
+                            config=cfg,
+                            stream_mode="updates",
+                        ):
+                            for ev in drain_events(thread_id):
+                                phase = ev.get("phase", "")
+                                tool = ev.get("tool", "?")
+                                if phase == "start":
+                                    args = ev.get("args", {})
+                                    args_preview = str(args)[:140]
+                                    events.append(
+                                        f"<div style='padding:4px 8px;border-left:3px solid #6366f1;"
+                                        f"background:#0f172a;margin:4px 0;font-family:monospace;"
+                                        f"font-size:0.8em;color:#a5b4fc'>"
+                                        f"▶ <b>{tool}</b> <span style='color:#64748b'>{args_preview}</span></div>"
+                                    )
+                                elif phase == "end":
+                                    dur = ev.get("duration_ms", 0)
+                                    preview = (ev.get("result_preview") or "")[:160].replace("\n", " ")
+                                    events.append(
+                                        f"<div style='padding:4px 8px;border-left:3px solid #22c55e;"
+                                        f"background:#0f172a;margin:4px 0;font-family:monospace;"
+                                        f"font-size:0.78em;color:#86efac'>"
+                                        f"✓ <b>{tool}</b> <span style='color:#64748b'>{dur}ms · {preview}</span></div>"
+                                    )
+                                elif phase == "error":
+                                    err = (ev.get("error") or "")[:240]
+                                    events.append(
+                                        f"<div style='padding:4px 8px;border-left:3px solid #ef4444;"
+                                        f"background:#0f172a;margin:4px 0;font-family:monospace;"
+                                        f"font-size:0.78em;color:#fca5a5'>"
+                                        f"✗ <b>{tool}</b> <span style='color:#64748b'>{err}</span></div>"
+                                    )
+
+                        # Pull final state from checkpointer
+                        state = _compose_agent["_"].get_state(cfg)
+                        if state and state.values:
+                            structured = state.values.get("structured_response")
+                            msgs = state.values.get("messages", []) or []
+                            if msgs:
+                                c = getattr(msgs[-1], "content", "") or ""
+                                if isinstance(c, list):
+                                    final_text = "".join(
+                                        b.get("text", "") if isinstance(b, dict) else str(b) for b in c
+                                    )
+                                else:
+                                    final_text = c
+                    except Exception as e:
+                        events.append(
+                            f"<div style='padding:6px 8px;color:#ef4444;background:#0f172a;"
+                            f"border:1px solid #ef4444;margin-top:8px'>"
+                            f"Orchestrator error: {e}</div>"
+                        )
+
+                    md_text = ""
+                    plain_text = ""
+                    html_text = ""
+                    if structured is not None:
+                        try:
+                            from openmark.composer.export import (
+                                to_linkedin_html, to_linkedin_plaintext, to_markdown,
+                            )
+                            md_text = to_markdown(structured)
+                            plain_text = to_linkedin_plaintext(structured)
+                            html_text = to_linkedin_html(structured)
+                        except Exception as e:
+                            md_text = f"_Export error: {e}_\n\n{final_text}"
+                    if not md_text and final_text:
+                        md_text = final_text
+
+                    events_html = (
+                        "<div style='max-height:340px;overflow-y:auto'>"
+                        + "".join(events[-200:])
+                        + "</div>"
+                        if events
+                        else "<p style='color:#475569;padding:8px'>No tool activity captured.</p>"
+                    )
+                    return events_html, md_text, plain_text, html_text
+
+                compose_btn.click(
+                    _compose_fn,
+                    inputs=[compose_brief, compose_format, compose_lang],
+                    outputs=[compose_events, compose_md, compose_plain, compose_html],
+                )
+
+            # ── Tab 7: Agent Tools (inspection panel) ─────────────────────
+            with gr.Tab("Agent Tools"):
+                gr.HTML("""
+                <div style='color:#64748b;font-size:0.83em;padding:4px 0 8px'>
+                  Live registry of every tool the agent can call. The
+                  researcher sub-agent in the composer gets the heavy slice;
+                  composer / humanizer / polisher / verifier get zero tools
+                  by design (least-privilege).
+                </div>""")
+                tools_html = gr.HTML()
+
+                def _render_agent_tools_panel():
+                    from openmark.agent.tools import ALL_TOOLS as _CHAT_TOOLS
+                    try:
+                        from openmark.composer.subagents import (
+                            RESEARCHER_TOOLS as _RES_TOOLS,
+                        )
+                    except Exception as e:
+                        return f"<div style='color:#ef4444;padding:8px'>Composer module import failed: {e}</div>"
+
+                    def _short_desc(t):
+                        d = (getattr(t, "description", "") or "").strip()
+                        d = d.split("\n", 1)[0]
+                        return (d[:200] + "...") if len(d) > 200 else d
+
+                    def _row(tool, owner):
+                        name = getattr(tool, "name", str(tool))
+                        return (
+                            f"<tr>"
+                            f"<td style='padding:6px 10px;color:#a78bfa;font-family:monospace'>{name}</td>"
+                            f"<td style='padding:6px 10px;color:#64748b;font-size:0.85em'>{owner}</td>"
+                            f"<td style='padding:6px 10px;color:#cbd5e1;font-size:0.85em'>{_short_desc(tool)}</td>"
+                            f"</tr>"
+                        )
+
+                    rows: list[str] = []
+                    for t in _CHAT_TOOLS:
+                        rows.append(_row(t, "chat agent (graph.py)"))
+                    res_names = {getattr(t, "name", None) for t in _RES_TOOLS}
+                    rows.append(_row(type("FakeTool", (), {"name": "(researcher slice)", "description": f"17 tools assigned to the composer's researcher sub-agent: {sorted(filter(None, res_names))}"})(), "composer · researcher"))
+                    return (
+                        f"<div style='color:#94a3b8;padding:2px 0 8px'>"
+                        f"<b style='color:#e2e8f0'>{len(_CHAT_TOOLS)}</b> tools registered for the chat agent · "
+                        f"<b style='color:#e2e8f0'>{len(_RES_TOOLS)}</b> tools partitioned to composer · researcher</div>"
+                        "<table style='width:100%;border-collapse:collapse;background:#0f172a;border:1px solid #1e293b;border-radius:8px'>"
+                        "<thead><tr style='background:#1e293b'>"
+                        "<th style='padding:8px 10px;text-align:left;color:#e2e8f0;font-size:0.85em'>Tool</th>"
+                        "<th style='padding:8px 10px;text-align:left;color:#e2e8f0;font-size:0.85em'>Owner</th>"
+                        "<th style='padding:8px 10px;text-align:left;color:#e2e8f0;font-size:0.85em'>Description</th>"
+                        "</tr></thead><tbody>"
+                        + "".join(rows)
+                        + "</tbody></table>"
+                    )
+
+                tools_refresh = gr.Button("Refresh", variant="secondary")
+                tools_refresh.click(_render_agent_tools_panel, outputs=tools_html)
+                app.load(_render_agent_tools_panel, outputs=tools_html)
+
+            # ── Tab 8: Agent Skills (inspection panel) ────────────────────
+            with gr.Tab("Agent Skills"):
+                gr.HTML("""
+                <div style='color:#64748b;font-size:0.83em;padding:4px 0 8px'>
+                  Live registry of every SKILL.md the agent can load. Three
+                  families: <b style='color:#e2e8f0'>openmark-*</b> (curated),
+                  <b style='color:#e2e8f0'>humanizer-*</b> (Arabic / Hebrew),
+                  and <b style='color:#e2e8f0'>agent-generated-*</b> (skills
+                  the agent wrote itself this session via <code>write_skill</code>).
+                </div>""")
+                skills_html = gr.HTML()
+
+                _FAMILY_COLORS = {
+                    "openmark":        "#22c55e",
+                    "humanizer":       "#a78bfa",
+                    "agent-generated": "#f59e0b",
+                    "skill":           "#64748b",
+                }
+
+                def _render_agent_skills_panel():
+                    from openmark.agent import skills as _sk
+                    try:
+                        _sk.reload_skills()
+                        ls = _sk.list_skills()
+                    except Exception as e:
+                        return f"<div style='color:#ef4444;padding:8px'>Skill scan failed: {e}</div>"
+
+                    by_family: dict[str, list[dict]] = {}
+                    for s in ls:
+                        by_family.setdefault(s.get("family", "skill"), []).append(s)
+
+                    parts: list[str] = []
+                    parts.append(
+                        f"<div style='color:#94a3b8;padding:2px 0 12px'>"
+                        f"<b style='color:#e2e8f0'>{len(ls)}</b> skills discovered across "
+                        f"<b style='color:#e2e8f0'>{len(by_family)}</b> families</div>"
+                    )
+
+                    family_order = ["openmark", "humanizer", "agent-generated", "skill"]
+                    for fam in family_order:
+                        items = by_family.get(fam) or []
+                        if not items:
+                            continue
+                        color = _FAMILY_COLORS.get(fam, "#64748b")
+                        label = "Created this session" if fam == "agent-generated" else f"{fam.title()} family"
+                        parts.append(
+                            f"<h3 style='color:{color};margin:18px 0 6px;font-size:1em'>"
+                            f"{label} <span style='color:#475569;font-size:0.85em'>({len(items)})</span></h3>"
+                        )
+                        parts.append(
+                            "<table style='width:100%;border-collapse:collapse;background:#0f172a;border:1px solid #1e293b;border-radius:8px;margin-bottom:8px'>"
+                            "<thead><tr style='background:#1e293b'>"
+                            "<th style='padding:6px 10px;text-align:left;color:#e2e8f0;font-size:0.82em'>Short name</th>"
+                            "<th style='padding:6px 10px;text-align:left;color:#e2e8f0;font-size:0.82em'>Type</th>"
+                            "<th style='padding:6px 10px;text-align:left;color:#e2e8f0;font-size:0.82em'>Description</th>"
+                            "<th style='padding:6px 10px;text-align:left;color:#e2e8f0;font-size:0.82em'>Body size</th>"
+                            "</tr></thead><tbody>"
+                        )
+                        for s in items:
+                            desc = (s.get("description") or "").strip()
+                            if len(desc) > 200:
+                                desc = desc[:197] + "..."
+                            parts.append(
+                                "<tr>"
+                                f"<td style='padding:6px 10px;color:{color};font-family:monospace'>/{s['short_name']}</td>"
+                                f"<td style='padding:6px 10px;color:#64748b;font-size:0.85em'>{s.get('type','skill')}</td>"
+                                f"<td style='padding:6px 10px;color:#cbd5e1;font-size:0.85em'>{desc}</td>"
+                                f"<td style='padding:6px 10px;color:#64748b;font-size:0.85em'>{len(s.get('body','')):,} chars</td>"
+                                "</tr>"
+                            )
+                        parts.append("</tbody></table>")
+                    return "".join(parts)
+
+                skills_refresh = gr.Button("Refresh", variant="secondary")
+                skills_refresh.click(_render_agent_skills_panel, outputs=skills_html)
+                app.load(_render_agent_skills_panel, outputs=skills_html)
+
     return app
 
 
