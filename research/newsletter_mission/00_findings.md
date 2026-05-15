@@ -66,20 +66,86 @@ Five `.claude/skills/openmark-newsletter*/SKILL.md` files exist. Already cover t
 
 ---
 
-## §5 Sub-agent architecture (deferred)
+## §5 Sub-agent architecture — DECIDED 2026-05-15 v2
 
-User explicit: "before adding sub agents i need the perfect newsletter composing agent tools." So sub-agents are §5 / future-work, not phase 1.
+User reversed prior position. Now: sub-agents are Phase 1, not future-work. Runtime = LangChain `deepagents` package. Pattern = orchestrator + researcher + composer + humanizer + polisher + verifier. Decision tree (`ref_decision_tree.md`) Q5 = YES on specialization. Full details in MISSION.md §3 + §5 + §7.
 
-### Do later
-- Decide: is it ONE agent with response_format dispatch, OR a planner-executor pair (deep-research → newsletter-composer), OR a fan-out of micro-agents per section?
-- Reference patterns: agent-blueprint (§3) and LangGraph Send fanout (already in this repo's skill set).
+### Resolved
+- ONE orchestrator → MANY specialists. Not "one agent only".
+- `deepagents.create_deep_agent` provides task tool, write_todos, skills auto-loader.
+- Each sub-agent gets least-privilege tool slicing (Manus principle 2).
+
+### Still to verify in Phase 1 D1
+- `deepagents` composes cleanly with our langchain 1.2.18 + langgraph 1.1.10 + Azure Foundry path.
+- Skill auto-loader picks up `.claude/skills/` directory without changes.
+- Sync/async mix works under Gradio's event loop.
 
 ---
 
-## §6 Open questions for Ahmad (collect, don't act)
+## §6 Open questions — see MISSION.md §13 for the v2 list
 
-- Is the public-link goal LinkedIn posts ONLY, or also the longer newsletter formats?
-- Does the embed live on Ahmad's existing personal site or a fresh subdomain?
-- Auth model: open URL (rate-limited), token-gated, or session-cookied?
-- Output delivery: stream in the browser, email to Ahmad, post directly to LinkedIn API?
-- Storage of drafts: SQLite (already used for chat history), Postgres, files, Notion?
+v1 questions Q1-Q8 were superseded by user's second message. v2 questions are Q9-Q13 and live in MISSION.md §13.
+
+## §7 New: LLM-neutral mandate (2026-05-15 v2)
+
+User: *"doesnt matter wich llm the agent uses, this shit has to work with any llm from foudnary."*
+
+Implication: schema enforcement must use `ToolStrategy(...)` (works with any tool-calling model), NOT `ProviderStrategy(...)` (provider-locked). Sub-agent factories accept `model=` arg defaulting to `build_executor()` which already honours `AGENT_PROVIDER` + `AZURE_DEPLOYMENT_EXECUTOR`.
+
+### Do later
+- Phase 1 D1 — measure schema-pass rate per Foundry model on 20 saved briefs.
+- If a specific Foundry model fails ToolStrategy >20% of the time, add ProviderStrategy fallback for that model only.
+
+## §8 New: skill self-authoring (2026-05-15 v2)
+
+User: *"create skills to use it it self."*
+
+Pattern: `write_skill(name, frontmatter, body)` tool, sandboxed to `.claude/skills/agent-generated/`. After write call `reload_skills()`. New skill becomes loadable same turn via existing `load_skill` mechanism. Cap 5/session.
+
+### Do later
+- Phase 1 D8 — implement the tool + cap + UI display in "Created this session" subsection.
+
+## §9 New: UI tools/skills panel (2026-05-15 v2)
+
+User: *"see in the UI the tools my agent has, the skill my agent create."*
+
+Two new Gradio tabs ("Agent Tools" + "Agent Skills"). Auto-populated from `ALL_TOOLS` and `list_skills()`. "Created this session" subsection in Skills tab is the agent-self-authoring view.
+
+### Do later
+- Phase 1 D10 — wire the tabs into `openmark/ui/app.py`.
+
+## §10 New: LinkedIn paste export (2026-05-15 v2)
+
+User: *"export special formats for me to copy and paste in linkedin."*
+
+Three rendering targets from one `LinkedInPost` Pydantic object:
+- `to_markdown(post)` — current chat UI auto-save flow
+- `to_linkedin_plaintext(post)` — no #, no md, URL footnotes, line-break tuning
+- `to_linkedin_html(post)` — paste-as-rich-text variant
+
+### Do later
+- Phase 1 D9 — implement in `openmark/composer/export.py`.
+
+## §11 New: humanizer-semitic integration (2026-05-15 v2)
+
+Local copies of all 4 skill bodies are in `humanizer/`. Drop them into `.claude/skills/humanizer-*/SKILL.md` (or symlink). Existing OpenMark skill loader picks them up automatically — frontmatter format matches.
+
+Caveat: humanizer-semitic is Arabic + Hebrew only. Question Q9 tracks whether Ahmad's audience is English (default) or Semitic. Composer skips humanizer for English drafts; the new `openmark-polisher` skill (Phase 1 D5) handles English-side AI-tell removal.
+
+### Do later
+- Phase 1 D5 — write `openmark-polisher` skill for English drafts.
+- Phase 1 D7 — drop humanizer-semitic skills into `.claude/skills/`.
+
+## §12 New: email rollout infra (2026-05-15 v2, deferred to Phase 3)
+
+Accounts to register NOW so Phase 3 is unblocked:
+1. Resend (3k emails/month free)
+2. Brevo (300/day free)
+3. Cloudflare (DNS + Tunnel)
+
+DNS records to plan: SPF, DKIM, DMARC for Ahmad's domain.
+
+### Do later
+- Register accounts. Save API keys in `.env`.
+- Provision DNS records once domain is decided.
+- Build `email_html(post)` Jinja2 template in `openmark/composer/export.py`.
