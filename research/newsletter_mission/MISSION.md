@@ -45,6 +45,8 @@ Walked the ML Mastery 5-question tree (`ref_decision_tree.md`) against this miss
 
 Implementation: LangChain `deepagents` framework. See `ref_deepagents.md`.
 
+**Source provenance note:** the 5-question tree above was extracted from a mirror at `geekfence.com` because the original `machinelearningmastery.com` page returned HTTP 403 to WebFetch. The mirror may paraphrase. Pattern conclusion holds regardless of phrasing; treat the exact question wording as approximate.
+
 ## 4. Current state of the codebase (post-commit `2e6b3a9`)
 
 **Agent stack:**
@@ -219,7 +221,8 @@ C4 says the agent can create skills it uses immediately. Pattern:
 - [x] Rewrite MISSION.md (this file) for v2
 
 ### Phase 1 — DO NOW (this session if Ahmad green-lights, otherwise next session)
-**D1.** Install `deepagents` package, verify it composes with langchain 1.2.18 + langgraph 1.1.10.
+**D0.** Upgrade `langchain` 1.2.18 → 1.3.x and `langgraph` 1.1.10 → 1.2.x (required by `deepagents 0.6.1`). Re-run the agent build and verify all 8 existing middleware layers still compose. Roll back if `inject_live_stats` / `OpenMarkSkillMiddleware` / `slash_skill_loader` break (likely minor API drift, not blocking).
+**D1.** Install `deepagents`. Verify `from deepagents import create_deep_agent` succeeds. PyPI confirmed real at version 0.6.1 (checked 2026-05-15).
 **D2.** Define schemas in `openmark/agent/schemas.py`: `PostSource`, `LinkedInPost`, `NewsletterEssay`, `NewsletterRoundup`, `NewsletterComparison`, `NewsletterAnalytical`, `VerificationReport`.
 **D3.** Build sub-agent factories in `openmark/agent/subagents.py`: `build_researcher()`, `build_composer(format_name)`, `build_humanizer()`, `build_verifier()`. Each is a thin `create_agent()` call wrapped in least-privilege tool slicing.
 **D4.** Add `openmark/agent/orchestrator.py` using `create_deep_agent(subagents=...)`. Skill auto-load wired to `.claude/skills/`.
@@ -287,7 +290,7 @@ Until then: copy-paste workflow via `to_linkedin_plaintext` export.
 - **Q9.** humanizer-semitic supports Arabic + Hebrew only. Are your LinkedIn posts in English (most likely), Arabic, Hebrew, or all of the above? The composer needs to know which humanizer to invoke (or skip).
 - **Q10.** Should the orchestrator be the EXISTING chat agent (extended with `task` tool) or a NEW orchestrator at a separate route? Two are valid — extending keeps one entry point; separate keeps Phase 1 isolated.
 - **Q11.** Skill self-authoring (§9) sounds powerful but risky. Confirm: 5 skills/session cap, sandboxed to `agent-generated/`, no overwrite of curated skills. Acceptable?
-- **Q12.** Output language detection: pass through composer (model guesses), OR explicit `language=` field in the user brief? Recommended: explicit field, no guessing.
+- **Q12.** Output language detection: pass through composer (model guesses), OR explicit `language=` field in the user brief? **Provisionally decided** — schema in §6 carries `language: Literal[...] = "en"`. Brief field overrides; no guessing. Confirm.
 - **Q13.** "Best 10x output" — measurable how? Suggest: each composer run is scored by the verifier on 4 dimensions (cite_check, voice_check, word_count_check, schema_check). Track per-format pass rate over time. Aim for >90% pass rate per format on the first try.
 
 ## 14. Diff from v1 (committed at `2e6b3a9`)
@@ -311,6 +314,8 @@ Until then: copy-paste workflow via `to_linkedin_plaintext` export.
 - 2026-05-15 v2: Public-link endpoint moved from Phase 1 to Phase 2. Phase 1 is upgrading the in-app agent first.
 - 2026-05-15 v2: humanizer-semitic added to the skill set. Used optionally based on Q9 answer.
 - 2026-05-15 v2: Email infra accounts/env documented in §11. Register accounts now so Phase 3 is unblocked.
+- 2026-05-15 v2: `deepagents` PyPI presence verified — version 0.6.1 exists, transitive deps add `langchain>=1.3.0`, `langgraph>=1.2.0`, `langchain-anthropic`, `langchain-google-genai`, `anthropic`. OpenMark currently sits on `langchain==1.2.18` + `langgraph==1.1.10`. A minor framework bump is the very first Phase 1 step (D0).
+- 2026-05-15 v2: Decision-tree source is the geekfence.com mirror, not the MLM original (403 on WebFetch). Pattern conclusion holds regardless; exact wording is approximate.
 
 ---
 
