@@ -1182,7 +1182,9 @@ def build_ui():
                             value="en",
                             label="Language",
                         )
-                        compose_btn = gr.Button("Compose ✨", variant="primary")
+                        with gr.Row():
+                            compose_btn = gr.Button("Compose ✨", variant="primary", scale=2)
+                            compose_stop_btn = gr.Button("⏹ Stop", variant="secondary", scale=1)
 
                 compose_events = gr.HTML(
                     value="<p style='color:#475569;padding:8px'>Live sub-agent + tool activity will stream here.</p>",
@@ -1196,19 +1198,41 @@ def build_ui():
                     with gr.Tab("LinkedIn HTML (paste as rich)"):
                         compose_html = gr.Code(language="html", lines=20)
 
+                def _events_html(events: list[str]) -> str:
+                    if not events:
+                        return "<p style='color:#475569;padding:8px'>Working…</p>"
+                    return (
+                        "<div style='max-height:380px;overflow-y:auto;display:flex;flex-direction:column-reverse'>"
+                        + "".join(events[-200:])
+                        + "</div>"
+                    )
+
+                def _ev_card(phase: str, tool: str, body: str, color: str, accent: str) -> str:
+                    return (
+                        f"<div style='padding:4px 8px;border-left:3px solid {accent};"
+                        f"background:#0f172a;margin:4px 0;font-family:monospace;"
+                        f"font-size:0.8em;color:{color}'>"
+                        f"{phase} <b>{tool}</b> <span style='color:#64748b'>{body}</span></div>"
+                    )
+
                 def _compose_fn(brief: str, format_name: str, language: str):
-                    """One-shot compose run. Returns (events_html, markdown, plaintext, html)."""
+                    """Streaming compose. Mirrors the chat tab's ask_stream pattern —
+                    yields incremental (events_html, md, plain, html) tuples so the
+                    UI updates LIVE as each sub-agent + tool call lands."""
                     if not brief or not brief.strip():
-                        return "<p style='color:#f97316;padding:8px'>Enter a brief above.</p>", "", "", ""
+                        yield "<p style='color:#f97316;padding:8px'>Enter a brief above.</p>", "", "", ""
+                        return
                     if _compose_agent["_"] is None:
+                        yield "<p style='color:#a5b4fc;padding:8px'>Compiling orchestrator + 11 sub-agents…</p>", "", "", ""
                         try:
                             from openmark.composer.orchestrator import build_composer_orchestrator
                             _compose_agent["_"] = build_composer_orchestrator()
                         except Exception as e:
-                            return (
+                            yield (
                                 f"<p style='color:#ef4444;padding:8px'>Composer build failed: {e}</p>",
                                 "", "", "",
                             )
+                            return
                     _compose_thread_counter["n"] += 1
                     thread_id = f"compose-{_compose_thread_counter['n']}"
 
@@ -1226,6 +1250,14 @@ def build_ui():
                     drain_events(thread_id)
 
                     events: list[str] = []
+                    # Seed the live box so the user sees something IMMEDIATELY
+                    events.append(_ev_card(
+                        "▶", "orchestrator",
+                        f"thread={thread_id} format={format_name} lang={language}",
+                        "#a5b4fc", "#6366f1",
+                    ))
+                    yield _events_html(events), "", "", ""
+
                     structured = None
                     final_text = ""
                     try:
@@ -1235,35 +1267,30 @@ def build_ui():
                             config=cfg,
                             stream_mode="updates",
                         ):
+                            new_in_chunk = 0
                             for ev in drain_events(thread_id):
                                 phase = ev.get("phase", "")
                                 tool = ev.get("tool", "?")
                                 if phase == "start":
-                                    args = ev.get("args", {})
-                                    args_preview = str(args)[:140]
-                                    events.append(
-                                        f"<div style='padding:4px 8px;border-left:3px solid #6366f1;"
-                                        f"background:#0f172a;margin:4px 0;font-family:monospace;"
-                                        f"font-size:0.8em;color:#a5b4fc'>"
-                                        f"▶ <b>{tool}</b> <span style='color:#64748b'>{args_preview}</span></div>"
-                                    )
+                                    args_preview = str(ev.get("args") or {})[:140]
+                                    events.append(_ev_card("▶", tool, args_preview,
+                                                           "#a5b4fc", "#6366f1"))
+                                    new_in_chunk += 1
                                 elif phase == "end":
                                     dur = ev.get("duration_ms", 0)
                                     preview = (ev.get("result_preview") or "")[:160].replace("\n", " ")
-                                    events.append(
-                                        f"<div style='padding:4px 8px;border-left:3px solid #22c55e;"
-                                        f"background:#0f172a;margin:4px 0;font-family:monospace;"
-                                        f"font-size:0.78em;color:#86efac'>"
-                                        f"✓ <b>{tool}</b> <span style='color:#64748b'>{dur}ms · {preview}</span></div>"
-                                    )
+                                    events.append(_ev_card("✓", tool, f"{dur}ms · {preview}",
+                                                           "#86efac", "#22c55e"))
+                                    new_in_chunk += 1
                                 elif phase == "error":
                                     err = (ev.get("error") or "")[:240]
-                                    events.append(
-                                        f"<div style='padding:4px 8px;border-left:3px solid #ef4444;"
-                                        f"background:#0f172a;margin:4px 0;font-family:monospace;"
-                                        f"font-size:0.78em;color:#fca5a5'>"
-                                        f"✗ <b>{tool}</b> <span style='color:#64748b'>{err}</span></div>"
-                                    )
+                                    events.append(_ev_card("✗", tool, err,
+                                                           "#fca5a5", "#ef4444"))
+                                    new_in_chunk += 1
+                            # YIELD on every chunk that had new events — Gradio
+                            # progressively repaints the cards box.
+                            if new_in_chunk:
+                                yield _events_html(events), "", "", ""
 
                         # Pull final state from checkpointer
                         state = _compose_agent["_"].get_state(cfg)
@@ -1279,11 +1306,9 @@ def build_ui():
                                 else:
                                     final_text = c
                     except Exception as e:
-                        events.append(
-                            f"<div style='padding:6px 8px;color:#ef4444;background:#0f172a;"
-                            f"border:1px solid #ef4444;margin-top:8px'>"
-                            f"Orchestrator error: {e}</div>"
-                        )
+                        events.append(_ev_card("✗", "orchestrator",
+                                               str(e)[:240], "#fca5a5", "#ef4444"))
+                        yield _events_html(events), "", "", ""
 
                     md_text = ""
                     plain_text = ""
@@ -1301,20 +1326,21 @@ def build_ui():
                     if not md_text and final_text:
                         md_text = final_text
 
-                    events_html = (
-                        "<div style='max-height:340px;overflow-y:auto'>"
-                        + "".join(events[-200:])
-                        + "</div>"
-                        if events
-                        else "<p style='color:#475569;padding:8px'>No tool activity captured.</p>"
-                    )
-                    return events_html, md_text, plain_text, html_text
+                    events.append(_ev_card(
+                        "●", "DONE",
+                        f"{len(events)-1} events · {len(md_text)} md chars · structured={'yes' if structured else 'no'}",
+                        "#fbbf24", "#f59e0b",
+                    ))
+                    yield _events_html(events), md_text, plain_text, html_text
 
-                compose_btn.click(
+                _compose_event = compose_btn.click(
                     _compose_fn,
                     inputs=[compose_brief, compose_format, compose_lang],
                     outputs=[compose_events, compose_md, compose_plain, compose_html],
                 )
+                # Stop button — cancels the running generator so a long compose
+                # can be killed mid-flight without restarting the app.
+                compose_stop_btn.click(fn=None, inputs=None, outputs=None, cancels=[_compose_event])
 
             # ── Tab 7: Agent Tools (inspection panel) ─────────────────────
             with gr.Tab("Agent Tools"):
