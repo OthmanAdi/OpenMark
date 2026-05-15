@@ -1192,7 +1192,7 @@ def build_ui():
                     with gr.Tab("Markdown (auto-saves)"):
                         compose_md = gr.Markdown()
                     with gr.Tab("LinkedIn plaintext (paste-ready)"):
-                        compose_plain = gr.Textbox(lines=20, show_copy_button=True)
+                        compose_plain = gr.Textbox(lines=20)
                     with gr.Tab("LinkedIn HTML (paste as rich)"):
                         compose_html = gr.Code(language="html", lines=20)
 
