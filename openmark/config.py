@@ -1,7 +1,29 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"), override=True)
+# Treat empty-string env vars as missing BEFORE loading .env so a blank
+# shell value (e.g. NEO4J_DATABASE='') doesn't beat the real .env value.
+# Without this, override=False keeps the '' and we silently connect to the
+# default Neo4j database instead of the one .env points at.
+_OPENMARK_CRITICAL_KEYS = (
+    "NEO4J_URI", "NEO4J_USER", "NEO4J_PASSWORD", "NEO4J_DATABASE",
+    "AGENT_PROVIDER", "BONSAI_URL", "BONSAI_MODEL",
+    "AZURE_ENDPOINT", "AZURE_API_KEY", "AZURE_API_VERSION",
+    "AZURE_DEPLOYMENT_LLM", "AZURE_DEPLOYMENT_EMBED",
+    "AZURE_DEPLOYMENT_PLANNER", "AZURE_DEPLOYMENT_EXECUTOR",
+    "AZURE_DEPLOYMENT_SYNTHESIZER", "AZURE_DEPLOYMENT_CLASSIFIER",
+    "AZURE_REASONING_PLANNER", "AZURE_REASONING_EXECUTOR",
+    "AZURE_REASONING_SYNTHESIZER", "AZURE_REASONING_CLASSIFIER",
+    "AZURE_VERBOSITY_SYNTHESIZER",
+    "RAINDROP_TOKEN", "RAINDROP_MISSION_DIR", "CHROMA_PATH",
+    "EMBEDDING_PROVIDER", "PPLX_QUERY_MODEL", "PPLX_DOC_MODEL",
+    "TAVILY_API_KEY", "BRAVE_API_KEY", "GITHUB_TOKEN",
+)
+for _k in _OPENMARK_CRITICAL_KEYS:
+    if os.environ.get(_k) == "":
+        del os.environ[_k]
+
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"), override=False)
 
 # Embedding
 EMBEDDING_PROVIDER     = os.getenv("EMBEDDING_PROVIDER", "local")

@@ -1156,7 +1156,7 @@ if __name__ == "__main__":
     ui = build_ui()
     ui.launch(
         server_name="127.0.0.1",
-        server_port=7860,
+        server_port=int(os.getenv("OPENMARK_PORT", "7860")),
         share=False,
         inbrowser=True,
         theme=gr.themes.Base(primary_hue="indigo", neutral_hue="slate"),

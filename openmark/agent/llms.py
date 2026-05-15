@@ -29,6 +29,49 @@ def _is_local() -> bool:
     return (getattr(config, "AGENT_PROVIDER", "azure") or "azure").lower() == "local"
 
 
+def _is_grok(name: str) -> bool:
+    return "grok" in (name or "").lower()
+
+
+def _is_reasoning_grok(name: str) -> bool:
+    n = (name or "").lower()
+    return "grok" in n and "reasoning" in n
+
+
+def _azure_grok(deployment: str, *, streaming: bool = True) -> "AzureChatOpenAI":
+    """
+    Grok on Azure Foundry uses Chat Completions, NOT Responses API. The
+    `use_responses_api=True` flag and `model_kwargs={"reasoning": ...}` we
+    use for codex would 400 here. grok-4-*-reasoning models accept the
+    top-level `reasoning_effort` param.
+
+    IMPORTANT: Foundry's xAI Grok endpoint requires the `model` field in the
+    request body. AzureChatOpenAI normally leaves it empty (since deployment
+    is in the URL path), which makes Foundry's deserializer reject the body
+    with `model: invalid type: null, expected a string`. Setting `model=`
+    explicitly fixes this — harmless for native Azure OpenAI deployments too.
+    """
+    print(f"[llms] route=azure-grok deployment={deployment} reasoning={_is_reasoning_grok(deployment)}")
+    kwargs = dict(
+        azure_deployment=deployment,
+        model=deployment,                      # required for Foundry-hosted models
+        azure_endpoint=config.AZURE_ENDPOINT,
+        api_key=config.AZURE_API_KEY,
+        api_version=config.AZURE_API_VERSION,
+        streaming=streaming,
+    )
+    # All modern Grok models (4.1 / 4.3 / 4.20-reasoning) accept the
+    # top-level `reasoning_effort` param. Default to AZURE_REASONING_EXECUTOR
+    # so .env can dial it (low/medium/high). Reasoning-only models (name
+    # contains "reasoning") get pinned to high since low/medium aren't
+    # really cheaper there.
+    kwargs["reasoning_effort"] = (
+        "high" if _is_reasoning_grok(deployment)
+        else (config.AZURE_REASONING_EXECUTOR or "high")
+    )
+    return AzureChatOpenAI(**kwargs)
+
+
 def _local_chat(
     *,
     temperature: float = 0.3,
@@ -84,8 +127,11 @@ def build_executor():
     """Tool-call executor."""
     if _is_local():
         return _local_chat(temperature=0.3, streaming=True)
+    dep = config.AZURE_DEPLOYMENT_EXECUTOR
+    if _is_grok(dep):
+        return _azure_grok(dep, streaming=True)
     return AzureChatOpenAI(
-        azure_deployment=config.AZURE_DEPLOYMENT_EXECUTOR,
+        azure_deployment=dep,
         model_kwargs=_codex_kwargs(effort=config.AZURE_REASONING_EXECUTOR, verbosity="low"),
         streaming=True,
         **_azure_base_kwargs(),
@@ -123,6 +169,8 @@ def build_classifier():
         return _local_chat(temperature=0, max_tokens=60, streaming=False)
 
     deployment = config.AZURE_DEPLOYMENT_CLASSIFIER
+    if _is_grok(deployment):
+        return _azure_grok(deployment, streaming=False)
     is_reasoning = deployment.startswith("gpt-5") or "codex" in deployment.lower()
     if is_reasoning:
         return AzureChatOpenAI(
