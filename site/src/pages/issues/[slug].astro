@@ -15,7 +15,7 @@ const { Content } = await render(issue);
 const { title, subtitle, kicker, published_at } = issue.data;
 const dateStr = published_at.toISOString().slice(0, 10);
 ---
-<BaseLayout title={title} description={subtitle || `${title} — OpenMark issue ${dateStr}`}>
+<BaseLayout title={title} description={subtitle || `${title} — OpenMark issue ${dateStr}`} ogType="article">
   <article class="prose prose-lg max-w-none">
     <div class="not-prose mb-6">
       <div class="flex items-baseline gap-3 text-xs uppercase tracking-widest text-muted">

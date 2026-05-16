@@ -6,12 +6,15 @@ interface Props {
   description?: string;
   canonical?: string;
   ogImage?: string;
+  ogType?: 'website' | 'article';
 }
 
-const { title, description, canonical, ogImage } = Astro.props;
+const { title, description, canonical, ogImage, ogType = 'website' } = Astro.props;
 const siteName = 'OpenMark';
 const fullTitle = title === siteName ? siteName : `${title} — ${siteName}`;
-const ogImageUrl = ogImage || new URL('/og-default.png', Astro.site).toString();
+// Fall back to the inline SVG favicon as the og:image so social shares don't 404.
+// Replace with a real /og.png (1200x630) before launch.
+const ogImageUrl = ogImage || new URL('/og.png', Astro.site).toString();
 const canonicalUrl = canonical || Astro.url.toString();
 ---
 <!DOCTYPE html>
@@ -25,9 +28,11 @@ const canonicalUrl = canonical || Astro.url.toString();
 
   <meta property="og:title" content={fullTitle} />
   {description && <meta property="og:description" content={description} />}
-  <meta property="og:type" content="article" />
+  <meta property="og:type" content={ogType} />
   <meta property="og:url" content={canonicalUrl} />
   <meta property="og:image" content={ogImageUrl} />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
   <meta property="og:site_name" content={siteName} />
 
   <meta name="twitter:card" content="summary_large_image" />

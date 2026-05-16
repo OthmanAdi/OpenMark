@@ -1,4 +1,20 @@
 User-agent: *
 Allow: /
 
+# Explicit allow for major AI crawlers — content is meant to be findable.
+User-agent: GPTBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: CCBot
+Allow: /
+
 Sitemap: /sitemap-index.xml

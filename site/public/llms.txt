@@ -1,22 +1,28 @@
 # OpenMark
 
-> Personal newsletter and knowledge graph from Ahmad Adi. Weekly issues on AI agents, retrieval-augmented generation, knowledge graphs, and the modern engineering stack. Sourced from a curated archive of ~13,000 bookmarks.
+> Personal newsletter and knowledge graph from Ahmad Adi. Weekly issues on AI agents, retrieval-augmented generation, knowledge graphs, and the modern engineering stack. Sourced from a curated archive of ~13,000 bookmarks, where every claim cites a real URL.
 
-OpenMark publishes weekly newsletter issues plus daily LinkedIn posts. Issues are written from a Neo4j Graph RAG store with 1024-dim pplx-embed vectors; every claim cites a real URL.
+OpenMark publishes weekly newsletter issues. Issues are composed by a multi-agent orchestrator (LangChain v1) running over a Neo4j Graph RAG store with 1024-dim pplx-embed vectors. The same content renders to web (this site) and email (via Resend) from a single markdown source.
 
 ## Content
 
-- [Issues archive](/issues/): Complete list of all newsletter issues
-- [RSS feed](/rss.xml): Subscribe via your reader
-- [Subscribe by email](/subscribe/): Weekly email digest
+- [Latest issue and archive](/issues/): Complete list of all newsletter issues in reverse-chronological order
+- [RSS feed](/rss.xml): Subscribe via any feed reader (Feedly, Inoreader, Mailbrew, etc.)
+- [Subscribe by email](/subscribe/): Weekly email digest with double opt-in
 
 ## Topics covered
 
-- AI agent architectures (LangChain v1, sub-agent patterns, middleware stacks)
-- Retrieval-augmented generation (vector + graph hybrid, embedding choices)
-- Knowledge graphs (Neo4j, Cypher, Louvain communities, SIMILAR_TO edges)
-- The modern engineering stack (Foundry-routed LLMs, MCP, structured tool use)
+- AI agent architectures: LangChain v1 `create_agent`, middleware stacks, sub-agent patterns, structured tool use, MCP
+- Retrieval-augmented generation: hybrid vector + graph retrieval, embedding model choices (pplx-embed, text-embedding-3-large), reranking
+- Knowledge graphs: Neo4j vector index, Cypher patterns, Louvain communities, SIMILAR_TO edges, tag co-occurrence networks
+- Modern engineering stack: Azure AI Foundry deployments, model routing, prompt caching, eval pipelines
+- Newsletter craft: single-source markdown to web + email, Maizzle templates, Resend deliverability
 
 ## Source code
 
-- [OpenMark repository](https://github.com/OthmanAdi/OpenMark): The orchestrator, sub-agents, and publish pipeline that produces this newsletter
+- [OpenMark repository](https://github.com/OthmanAdi/OpenMark): The orchestrator, 10 sub-agents, and publish pipeline that produces this newsletter. Pure LangChain, no deepagents. MIT licensed.
+
+## Optional
+
+- [Subscribe page details](/subscribe/): Privacy and opt-in mechanics
+- [Robots policy](/robots.txt): Crawl policy — open to AI crawlers because content is meant to be reachable
