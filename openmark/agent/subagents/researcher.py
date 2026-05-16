@@ -1,0 +1,137 @@
+"""
+Researcher sub-agent.
+
+Owns the heavy retrieval surface — 21 OpenMark graph + web tools. The
+orchestrator never sees these directly; it delegates retrieval missions to
+`task_researcher(brief)` and gets back a compact anchor list.
+"""
+
+from __future__ import annotations
+
+from openmark.agent.llms import build_researcher
+from openmark.agent.subagents._common import (
+    format_for_orchestrator,
+    invoke_subagent,
+    make_subagent_graph,
+    task_tool,
+)
+from openmark.agent.tools import (
+    explore_tag_cluster,
+    find_by_domain,
+    find_by_source,
+    find_by_tag,
+    find_recent,
+    get_bookmark_full,
+    get_stats,
+    github_repo_intel,
+    graph_expand,
+    reddit_search,
+    run_cypher,
+    search_by_category,
+    search_by_community,
+    search_by_date_range,
+    search_linkedin,
+    search_semantic,
+    search_youtube,
+    web_crawl,
+    web_extract,
+    web_fetch,
+    web_search,
+)
+
+
+RESEARCHER_TOOLS = [
+    # OpenMark graph retrieval (15)
+    search_semantic,
+    search_by_category,
+    search_by_community,
+    find_by_tag,
+    explore_tag_cluster,
+    graph_expand,
+    find_by_domain,
+    find_by_source,
+    search_linkedin,
+    search_youtube,
+    find_recent,
+    search_by_date_range,
+    get_bookmark_full,
+    get_stats,
+    run_cypher,            # read-only enforced inside the tool
+    # Web research (6)
+    web_search,
+    web_fetch,
+    web_extract,
+    web_crawl,
+    github_repo_intel,
+    reddit_search,
+]
+
+
+RESEARCHER_PROMPT = """You are the OpenMark Researcher sub-agent.
+
+Your one job: gather anchors and citations for the orchestrator's mission.
+
+WORKFLOW
+1. Parse the brief. Identify topic, time window, format hint, and any URLs.
+2. Pull from OpenMark FIRST (vector + graph). Fan out parallel calls when
+   queries are independent: search_semantic + search_by_community OR
+   search_by_category + search_linkedin / search_youtube as appropriate.
+3. If OpenMark returns thin (<3 strong hits) AND the brief tolerates fresh
+   data, do ONE round of web_search + targeted web_fetch on top results.
+4. For the strongest 1-3 winners, call graph_expand(url) to surface neighbors.
+5. Always return a structured anchor list, even if short.
+
+OUTPUT (always emit this JSON-ish block at the end of your final answer)
+```json
+{
+  "anchors":   [{"url": "...", "title": "...", "why": "...", "source": "openmark|web"}, ...],
+  "secondary": [{...}, ...],
+  "notes":     "one short paragraph: what was rich, what was sparse, what to ignore"
+}
+```
+
+CITATION DISCIPLINE
+- Every URL you list MUST have appeared in a tool result this turn.
+- Never invent a URL. If a tool returns thin results, say so in `notes`.
+- Don't paraphrase URLs away from their canonical form.
+
+You have access to read-only Cypher. Use it ONLY when higher-level tools cannot
+answer (e.g. counting edges of a specific type, exact tag intersections).
+"""
+
+
+_RESEARCHER_GRAPH = None
+
+
+def _get_graph():
+    global _RESEARCHER_GRAPH
+    if _RESEARCHER_GRAPH is None:
+        _RESEARCHER_GRAPH = make_subagent_graph(
+            model=build_researcher(),
+            tools=RESEARCHER_TOOLS,
+            system_prompt=RESEARCHER_PROMPT,
+            run_limit=12,                       # research can chain many tool calls
+            summarization_trigger=("tokens", 60_000),
+            context_edit_trigger=80_000,
+            context_edit_keep=6,
+        )
+    return _RESEARCHER_GRAPH
+
+
+@task_tool(
+    "researcher",
+    """Delegate research / retrieval to the OpenMark Researcher sub-agent.
+
+Use for: finding bookmarks on a topic, building an anchor list before
+composition, time-window digests, single-URL exploration, deep landscape
+research. The sub-agent has access to 21 tools (15 graph + 6 web) and
+returns a structured anchor list with citations the orchestrator can use.
+
+Pass a clear mission `brief` — topic, angle, time window, any constraints.
+Returns a compact summary + JSON anchor block + telemetry.
+""",
+)
+def task_researcher(brief: str) -> str:
+    result, dur = invoke_subagent(_get_graph(), brief)
+    return format_for_orchestrator(role="researcher", result=result,
+                                   duration_ms=dur, include_structured=False)

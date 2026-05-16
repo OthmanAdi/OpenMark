@@ -1149,16 +1149,15 @@ def build_ui():
                     show_progress="full",
                 )
 
-            # ── Tab 6: Compose (multi-agent orchestrator) ─────────────────
+            # ── Tab 6: Compose — thin wrapper over the chat orchestrator ──
             with gr.Tab("Compose ✨"):
                 gr.HTML("""
                 <div style='color:#64748b;font-size:0.83em;padding:4px 0 8px'>
-                  Multi-agent orchestrator — researcher → composer →
-                  polisher/humanizer → verifier. Reuses the same live tool-card
-                  stream as Chat. Output is rendered as Markdown plus a
-                  LinkedIn-paste plaintext and an HTML variant.
+                  Same v3 chat orchestrator, formatted brief. The orchestrator
+                  delegates to task_researcher → task_compose_* → task_polish /
+                  task_humanize → task_verify. Live cards stream from the same
+                  event bus as the Chat tab.
                 </div>""")
-                _compose_agent = {"_": None}    # lazy-built on first compose
                 _compose_thread_counter = {"n": 0}
 
                 with gr.Row():
@@ -1216,34 +1215,32 @@ def build_ui():
                     )
 
                 def _compose_fn(brief: str, format_name: str, language: str):
-                    """Streaming compose. Mirrors the chat tab's ask_stream pattern —
-                    yields incremental (events_html, md, plain, html) tuples so the
-                    UI updates LIVE as each sub-agent + tool call lands."""
+                    """Streaming compose using the SAME v3 chat orchestrator.
+                    Yields (events_html, md, plain, html) tuples that paint as
+                    each sub-agent tool call lands."""
                     if not brief or not brief.strip():
                         yield "<p style='color:#f97316;padding:8px'>Enter a brief above.</p>", "", "", ""
                         return
-                    if _compose_agent["_"] is None:
-                        yield "<p style='color:#a5b4fc;padding:8px'>Compiling orchestrator + 11 sub-agents…</p>", "", "", ""
-                        try:
-                            from openmark.composer.orchestrator import build_composer_orchestrator
-                            _compose_agent["_"] = build_composer_orchestrator()
-                        except Exception as e:
-                            yield (
-                                f"<p style='color:#ef4444;padding:8px'>Composer build failed: {e}</p>",
-                                "", "", "",
-                            )
-                            return
+                    if _agent is None:
+                        yield (
+                            f"<p style='color:#ef4444;padding:8px'>Chat orchestrator unavailable: {_agent_error}</p>",
+                            "", "", "",
+                        )
+                        return
                     _compose_thread_counter["n"] += 1
                     thread_id = f"compose-{_compose_thread_counter['n']}"
 
                     enriched = (
-                        f"Format: {format_name}\nLanguage: {language}\n\n"
-                        f"Brief: {brief.strip()}\n\n"
-                        f"Pick the matching composer sub-agent for format `{format_name}`. "
-                        f"Pull anchors from OpenMark first via the researcher. "
-                        f"Language is `{language}` — if Arabic or Hebrew, route through the humanizer; "
-                        f"if English, route through the polisher. Then verify. "
-                        f"Return the final composer Pydantic instance."
+                        f"Compose a `{format_name}` output in language `{language}`.\n\n"
+                        f"Topic / brief: {brief.strip()}\n\n"
+                        "Standard compose loop:\n"
+                        "1. write_todos to plan.\n"
+                        f"2. task_researcher to pull anchors for the topic (OpenMark first, web second if thin).\n"
+                        f"3. task_compose_{format_name} with topic + angle + language + researcher anchors verbatim.\n"
+                        f"4. If language is 'en' -> task_polish; else (ar-* or he) -> task_humanize.\n"
+                        f"5. task_verify with the composer output + seen URLs from the researcher.\n"
+                        f"6. If verifier.overall_passed=False, retry task_compose_{format_name} ONCE with fix_instructions, then re-verify.\n"
+                        f"7. Return the final structured composer output.\n"
                     )
 
                     from openmark.agent.middleware import drain_events
@@ -1262,7 +1259,7 @@ def build_ui():
                     final_text = ""
                     try:
                         cfg = {"configurable": {"thread_id": thread_id}}
-                        for chunk in _compose_agent["_"].stream(
+                        for chunk in _agent.stream(
                             {"messages": [{"role": "user", "content": enriched}]},
                             config=cfg,
                             stream_mode="updates",
@@ -1293,7 +1290,7 @@ def build_ui():
                                 yield _events_html(events), "", "", ""
 
                         # Pull final state from checkpointer
-                        state = _compose_agent["_"].get_state(cfg)
+                        state = _agent.get_state(cfg)
                         if state and state.values:
                             structured = state.values.get("structured_response")
                             msgs = state.values.get("messages", []) or []
@@ -1354,13 +1351,13 @@ def build_ui():
                 tools_html = gr.HTML()
 
                 def _render_agent_tools_panel():
-                    from openmark.agent.tools import ALL_TOOLS as _CHAT_TOOLS
+                    from openmark.agent.subagents import ALL_SUBAGENT_TOOLS as _ORCH_TOOLS
                     try:
-                        from openmark.composer.subagents import (
+                        from openmark.agent.subagents.researcher import (
                             RESEARCHER_TOOLS as _RES_TOOLS,
                         )
                     except Exception as e:
-                        return f"<div style='color:#ef4444;padding:8px'>Composer module import failed: {e}</div>"
+                        return f"<div style='color:#ef4444;padding:8px'>Subagent module import failed: {e}</div>"
 
                     def _short_desc(t):
                         d = (getattr(t, "description", "") or "").strip()
@@ -1378,14 +1375,14 @@ def build_ui():
                         )
 
                     rows: list[str] = []
-                    for t in _CHAT_TOOLS:
-                        rows.append(_row(t, "chat agent (graph.py)"))
+                    for t in _ORCH_TOOLS:
+                        rows.append(_row(t, "orchestrator (graph.py)"))
                     res_names = {getattr(t, "name", None) for t in _RES_TOOLS}
-                    rows.append(_row(type("FakeTool", (), {"name": "(researcher slice)", "description": f"17 tools assigned to the composer's researcher sub-agent: {sorted(filter(None, res_names))}"})(), "composer · researcher"))
+                    rows.append(_row(type("FakeTool", (), {"name": "(researcher slice)", "description": f"{len(_RES_TOOLS)} retrieval/web tools assigned to the researcher sub-agent: {sorted(filter(None, res_names))}"})(), "researcher sub-agent"))
                     return (
                         f"<div style='color:#94a3b8;padding:2px 0 8px'>"
-                        f"<b style='color:#e2e8f0'>{len(_CHAT_TOOLS)}</b> tools registered for the chat agent · "
-                        f"<b style='color:#e2e8f0'>{len(_RES_TOOLS)}</b> tools partitioned to composer · researcher</div>"
+                        f"<b style='color:#e2e8f0'>{len(_ORCH_TOOLS)}</b> task_* sub-agent tools on the orchestrator · "
+                        f"<b style='color:#e2e8f0'>{len(_RES_TOOLS)}</b> retrieval tools inside the researcher sub-agent</div>"
                         "<table style='width:100%;border-collapse:collapse;background:#0f172a;border:1px solid #1e293b;border-radius:8px'>"
                         "<thead><tr style='background:#1e293b'>"
                         "<th style='padding:8px 10px;text-align:left;color:#e2e8f0;font-size:0.85em'>Tool</th>"

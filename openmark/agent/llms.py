@@ -1,188 +1,221 @@
 """
-LLM factory for OpenMark agent.
+LLM factory for the v3 orchestrator + sub-agent stack.
 
-Two routes:
-  AGENT_PROVIDER=azure  → AzureChatOpenAI on gpt-5.3-codex via Responses API,
-                          reasoning=high, summary=detailed (production default).
-  AGENT_PROVIDER=local  → ChatOpenAI pointed at BONSAI_URL (OpenAI-compatible
-                          server: llama.cpp / vLLM / Ollama / LM Studio).
-                          No Azure call is made, even as a fallback.
-                          Verify in stdout: "[llms] route=local ..." on first call.
+Single source of truth for Foundry deployments via `openmark.models.role_model_id`.
+Every builder honors AGENT_PROVIDER=azure|local but Foundry is the production
+path; local is a thin escape hatch using BONSAI_URL / BONSAI_MODEL.
 
-To run Hermes-3-Llama-3.1-8B locally:
-    huggingface-cli download bartowski/Hermes-3-Llama-3.1-8B-GGUF \
-        Hermes-3-Llama-3.1-8B-Q4_K_M.gguf --local-dir ./models/hermes-3-8b
-    llama-server -m ./models/hermes-3-8b/Hermes-3-Llama-3.1-8B-Q4_K_M.gguf \
-        --port 8080 --host 127.0.0.1 -c 8192 --jinja
-    # in .env:
-    AGENT_PROVIDER=local
-    BONSAI_URL=http://localhost:8080/v1
-    BONSAI_MODEL=hermes-3-llama-3.1-8b
-The --jinja flag is REQUIRED for Hermes's tool-call template translation.
+Public API (back-compat with v2 callers):
+    build_orchestrator()    — frontier reasoning, long context
+    build_classifier()      — fast non-reasoning, cheap
+    build_summarizer()      — alias of classifier
+    build_researcher()      — tool-heavy reasoning
+    build_composer()        — long-output reasoning
+    build_humanizer()       — multilingual reasoning
+    build_polisher()        — fast English editor
+    build_verifier()        — structured-output reasoning
+    build_skill_author()    — cheap non-reasoning
+
+Legacy aliases kept so existing imports don't break:
+    build_executor()        -> build_orchestrator()
+    build_planner()         -> build_orchestrator()
+    build_synthesizer()     -> build_composer()
+    build_default()         -> build_orchestrator()
+
+Foundry-specific quirks:
+- Grok deployments need `model=deployment` in the body (Foundry deserializer
+  rejects null `model`). `_azure_grok` handles it.
+- gpt-5.x and codex are Responses API; reasoning effort goes in `model_kwargs`
+  with `use_responses_api=True`. `_azure_codex` handles it.
+- gpt-4.x and o-series chat-completions are vanilla `AzureChatOpenAI`.
 """
 
+from __future__ import annotations
+
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
+
 from openmark import config
+from openmark.models import get as get_model_spec
+from openmark.models import role_model_id
 
 
 def _is_local() -> bool:
     return (getattr(config, "AGENT_PROVIDER", "azure") or "azure").lower() == "local"
 
 
-def _is_grok(name: str) -> bool:
-    return "grok" in (name or "").lower()
+def _is_grok(deployment: str) -> bool:
+    return "grok" in (deployment or "").lower()
 
 
-def _is_reasoning_grok(name: str) -> bool:
-    n = (name or "").lower()
-    return "grok" in n and "reasoning" in n
-
-
-def _azure_grok(deployment: str, *, streaming: bool = True) -> "AzureChatOpenAI":
-    """
-    Grok on Azure Foundry uses Chat Completions, NOT Responses API. The
-    `use_responses_api=True` flag and `model_kwargs={"reasoning": ...}` we
-    use for codex would 400 here. grok-4-*-reasoning models accept the
-    top-level `reasoning_effort` param.
-
-    IMPORTANT: Foundry's xAI Grok endpoint requires the `model` field in the
-    request body. AzureChatOpenAI normally leaves it empty (since deployment
-    is in the URL path), which makes Foundry's deserializer reject the body
-    with `model: invalid type: null, expected a string`. Setting `model=`
-    explicitly fixes this — harmless for native Azure OpenAI deployments too.
-    """
-    print(f"[llms] route=azure-grok deployment={deployment} reasoning={_is_reasoning_grok(deployment)}")
-    kwargs = dict(
-        azure_deployment=deployment,
-        model=deployment,                      # required for Foundry-hosted models
-        azure_endpoint=config.AZURE_ENDPOINT,
-        api_key=config.AZURE_API_KEY,
-        api_version=config.AZURE_API_VERSION,
-        streaming=streaming,
+def _is_reasoning_model(deployment: str) -> bool:
+    """True for gpt-5*, codex, o1, o3, deepseek-reasoner — anything that
+    accepts a `reasoning` dict via Responses API."""
+    spec = get_model_spec(deployment)
+    if spec is not None:
+        return spec.reasoning
+    # Fallback heuristic when deployment id is not in our bank
+    name = (deployment or "").lower()
+    return (
+        name.startswith("gpt-5")
+        or "codex" in name
+        or name.startswith("o1")
+        or name.startswith("o3")
+        or "reasoner" in name
     )
-    # All modern Grok models (4.1 / 4.3 / 4.20-reasoning) accept the
-    # top-level `reasoning_effort` param. Default to AZURE_REASONING_EXECUTOR
-    # so .env can dial it (low/medium/high). Reasoning-only models (name
-    # contains "reasoning") get pinned to high since low/medium aren't
-    # really cheaper there.
-    kwargs["reasoning_effort"] = (
-        "high" if _is_reasoning_grok(deployment)
-        else (config.AZURE_REASONING_EXECUTOR or "high")
-    )
-    return AzureChatOpenAI(**kwargs)
 
 
-def _local_chat(
-    *,
-    temperature: float = 0.3,
-    max_tokens: int | None = None,
-    streaming: bool = True,
-) -> ChatOpenAI:
-    """OpenAI-compatible client for a local llama.cpp / vLLM / Ollama server."""
-    print(f"[llms] route=local url={config.BONSAI_URL} model={config.BONSAI_MODEL}")
+# ── Build paths ─────────────────────────────────────────────────────────────
+
+
+def _local_chat(*, temperature: float = 0.3, streaming: bool = True) -> ChatOpenAI:
+    """OpenAI-compatible client for llama.cpp / Ollama / vLLM running locally."""
     return ChatOpenAI(
         base_url=config.BONSAI_URL,
-        api_key="local",          # llama-server ignores it; placeholder to satisfy SDK
+        api_key="local",
         model=config.BONSAI_MODEL,
         temperature=temperature,
-        max_tokens=max_tokens,
         streaming=streaming,
     )
 
 
-# ── Azure-only helpers ────────────────────────────────────────────────────────
-
-def _azure_base_kwargs():
-    """Auth + endpoint, shared across Azure roles."""
+def _azure_base_kwargs() -> dict:
     return dict(
         azure_endpoint=config.AZURE_ENDPOINT,
         api_key=config.AZURE_API_KEY,
         api_version=config.AZURE_API_VERSION,
-        use_responses_api=True,   # codex = Responses only
     )
 
 
-def _codex_kwargs(effort: str, verbosity: str = "medium"):
-    """Reasoning + verbosity for codex models. summary=detailed → thinking always shown."""
-    return {
-        "reasoning": {"effort": effort, "summary": "detailed"},
-        "text":      {"verbosity": verbosity},
-    }
+def _azure_grok(deployment: str, *, streaming: bool = True, effort: str = "high") -> AzureChatOpenAI:
+    """
+    Foundry-hosted xAI Grok over Chat Completions API.
 
-
-# ── Role builders — each one branches on AGENT_PROVIDER ───────────────────────
-
-def build_planner():
-    """Strategy planner — Azure: codex 5.3 high. Local: same chat client as executor."""
-    if _is_local():
-        return _local_chat(temperature=0.2)
+    Quirk: Foundry's deserializer rejects null `model` in the body. We pass
+    both `azure_deployment=` (URL path) AND `model=` (body field via model_name)
+    so the request passes validation. Reasoning effort is a top-level field on
+    AzureChatOpenAI in langchain-openai 1.2+.
+    """
     return AzureChatOpenAI(
-        azure_deployment=config.AZURE_DEPLOYMENT_PLANNER,
-        model_kwargs=_codex_kwargs(effort=config.AZURE_REASONING_PLANNER, verbosity="low"),
+        azure_deployment=deployment,
+        model_name=deployment,           # required for Foundry-hosted partner models
+        streaming=streaming,
+        reasoning_effort=effort,
         **_azure_base_kwargs(),
     )
 
 
-def build_executor():
-    """Tool-call executor."""
-    if _is_local():
-        return _local_chat(temperature=0.3, streaming=True)
-    dep = config.AZURE_DEPLOYMENT_EXECUTOR
-    if _is_grok(dep):
-        return _azure_grok(dep, streaming=True)
+def _azure_codex(
+    deployment: str,
+    *,
+    streaming: bool = True,
+    effort: str = "high",
+    verbosity: str = "medium",
+) -> AzureChatOpenAI:
+    """
+    Foundry-hosted OpenAI reasoning model (gpt-5*, codex, o-series) over the
+    Responses API. Uses top-level `reasoning` + `verbosity` fields on
+    AzureChatOpenAI (langchain-openai 1.2+ idiom). The SDK auto-routes to the
+    Responses API whenever `reasoning=` is set.
+    """
     return AzureChatOpenAI(
-        azure_deployment=dep,
-        model_kwargs=_codex_kwargs(effort=config.AZURE_REASONING_EXECUTOR, verbosity="low"),
-        streaming=True,
+        azure_deployment=deployment,
+        use_responses_api=True,
+        streaming=streaming,
+        reasoning={"effort": effort, "summary": "detailed"},
+        verbosity=verbosity,
         **_azure_base_kwargs(),
     )
 
 
-def build_synthesizer():
-    """Grounded synthesis — Azure: codex 5.3 high. Local: shares the executor model."""
-    if _is_local():
-        return _local_chat(temperature=0.3, streaming=True)
+def _azure_chat(deployment: str, *, streaming: bool = True, temperature: float = 0.3) -> AzureChatOpenAI:
+    """Vanilla Foundry Chat Completions deployment (gpt-4.x, mistral, llama)."""
     return AzureChatOpenAI(
-        azure_deployment=config.AZURE_DEPLOYMENT_SYNTHESIZER,
-        model_kwargs=_codex_kwargs(
-            effort=config.AZURE_REASONING_SYNTHESIZER,
-            verbosity=config.AZURE_VERBOSITY_SYNTHESIZER,
-        ),
-        streaming=True,
+        azure_deployment=deployment,
+        streaming=streaming,
+        temperature=temperature,
         **_azure_base_kwargs(),
     )
 
 
-def build_default():
-    """Single LLM for the legacy v1 ReAct agent."""
-    return build_executor()
+def _build_for_role(role: str, *, effort: str = "high", verbosity: str = "low",
+                    streaming: bool = True, temperature: float | None = None):
+    """Resolve role -> deployment id -> right AzureChatOpenAI wrapper."""
+    if _is_local():
+        return _local_chat(temperature=(temperature if temperature is not None else 0.3),
+                           streaming=streaming)
+
+    deployment = role_model_id(role)  # type: ignore[arg-type]
+    if _is_grok(deployment):
+        return _azure_grok(deployment, streaming=streaming, effort=effort)
+    if _is_reasoning_model(deployment):
+        return _azure_codex(deployment, streaming=streaming, effort=effort, verbosity=verbosity)
+    return _azure_chat(deployment, streaming=streaming,
+                       temperature=(temperature if temperature is not None else 0.3))
+
+
+# ── Role builders ────────────────────────────────────────────────────────────
+
+
+def build_orchestrator():
+    """Frontier reasoning model with long context. Drives the chat agent."""
+    return _build_for_role("orchestrator", effort="high", verbosity="low")
 
 
 def build_classifier():
-    """
-    Cheap, low-latency tier for query classification (fast / deep / newsletter /
-    digest / dive). On local route, we just reuse the same local model since
-    Hermes-3-8B is already cheap. On Azure, picks gpt-5-mini or whatever
-    AZURE_DEPLOYMENT_CLASSIFIER points at.
-    """
-    if _is_local():
-        return _local_chat(temperature=0, max_tokens=60, streaming=False)
+    """Cheap fast non-reasoning model for intent classification + summarization."""
+    return _build_for_role("classifier", effort="low", verbosity="low",
+                           streaming=False, temperature=0.0)
 
-    deployment = config.AZURE_DEPLOYMENT_CLASSIFIER
-    if _is_grok(deployment):
-        return _azure_grok(deployment, streaming=False)
-    is_reasoning = deployment.startswith("gpt-5") or "codex" in deployment.lower()
-    if is_reasoning:
-        return AzureChatOpenAI(
-            azure_deployment=deployment,
-            model_kwargs=_codex_kwargs(effort=config.AZURE_REASONING_CLASSIFIER, verbosity="low"),
-            **_azure_base_kwargs(),
-        )
-    return AzureChatOpenAI(
-        azure_deployment=deployment,
-        azure_endpoint=config.AZURE_ENDPOINT,
-        api_key=config.AZURE_API_KEY,
-        api_version=config.AZURE_API_VERSION,
-        temperature=0,
-        max_tokens=120,
-    )
+
+def build_summarizer():
+    """Alias of classifier — same cheap model is fine for history summarization."""
+    return build_classifier()
+
+
+def build_researcher():
+    """Tool-heavy reasoning model for the researcher sub-agent."""
+    return _build_for_role("researcher", effort="high", verbosity="low")
+
+
+def build_composer():
+    """Long-output reasoning model for composer sub-agents."""
+    return _build_for_role("composer", effort="high", verbosity="medium")
+
+
+def build_humanizer():
+    """Multilingual reasoning model for Arabic / Hebrew humanizer sub-agent."""
+    return _build_for_role("humanizer", effort="medium", verbosity="medium")
+
+
+def build_polisher():
+    """Fast English editor model for the polisher sub-agent."""
+    return _build_for_role("polisher", effort="low", verbosity="low", temperature=0.3)
+
+
+def build_verifier():
+    """Structured-output reasoning model for the verifier sub-agent."""
+    return _build_for_role("verifier", effort="medium", verbosity="low")
+
+
+def build_skill_author():
+    """Cheap non-reasoning model for the skill-author sub-agent."""
+    return _build_for_role("skill_author", effort="low", verbosity="low", temperature=0.3)
+
+
+# ── Back-compat shims ───────────────────────────────────────────────────────
+
+def build_executor():
+    """Legacy alias — v2 callers used build_executor as the main agent LLM."""
+    return build_orchestrator()
+
+
+def build_planner():
+    return build_orchestrator()
+
+
+def build_synthesizer():
+    return build_composer()
+
+
+def build_default():
+    return build_orchestrator()

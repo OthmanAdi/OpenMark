@@ -11,7 +11,8 @@ data/*.json
 data/*.html
 
 # ── Local model files (too large for GitHub) ─────────────────
-models/
+# Root-level only — do NOT clobber openmark/models/ (Foundry registry code).
+/models/
 
 # ── AI tool skill configs (machine-specific) ─────────────────
 skills/
@@ -63,6 +64,8 @@ drafts/
 
 # ── Chat history (personal) ──────────────────────────────────
 data/*.db
+data/*.db-shm
+data/*.db-wal
 data/openmark_chat.db
 
 # ── MCP config (machine-specific paths) ──────────────────────
@@ -122,3 +125,12 @@ scan_nsfw.py
 _purge_now.py
 app.py
 space_readme.md
+
+# ── Session / handoff / research / drafts (never push to remote) ─────────
+# Code only on remote. Markdown / research dossiers / generated drafts are local.
+NEXT.md
+SESSION_HANDOFF.md
+research/
+drafts/
+ONBOARDING.md
+*.session.md
