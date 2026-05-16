@@ -1,8 +1,11 @@
 ---
-// Subscribe form. Posts to the configured PUBLISH_API_URL endpoint, which is
-// either a Cloudflare Worker or the local Python endpoint exposed via tunnel.
-// In static-export mode we don't run server code here — the form does a
-// vanilla POST and the endpoint returns a redirect or JSON.
+// Subscribe form. Posts to /api/subscribe, which is a Cloudflare Pages
+// Function (site/functions/api/subscribe.ts) running on the edge. It writes
+// the pending row into the bound D1 database and triggers a Resend confirm-
+// link email. The Function 303-redirects back to /subscribe?status=sent.
+//
+// Override the endpoint by setting PUBLIC_PUBLISH_API_URL at build time if
+// you're hosting somewhere other than Cloudflare Pages.
 
 const API_URL = import.meta.env.PUBLIC_PUBLISH_API_URL || '/api/subscribe';
 ---

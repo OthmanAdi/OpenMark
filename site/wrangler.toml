@@ -1,0 +1,27 @@
+# Cloudflare Pages config for the OpenMark site.
+# Pages auto-detects most settings via the Cloudflare dashboard; this file
+# binds the D1 database the subscribe endpoints need.
+#
+# After `wrangler d1 create openmark-subscribers`, paste the database_id
+# below. Run migrations with:
+#   wrangler d1 execute openmark-subscribers --remote --file=migrations/001_subscribers.sql
+
+name = "openmark-site"
+compatibility_date = "2024-12-30"
+pages_build_output_dir = "dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "openmark-subscribers"
+database_id = "REPLACE_WITH_D1_ID_FROM_WRANGLER_CREATE"
+
+# Worker env vars (set via `wrangler pages secret put` or the dashboard).
+# Do NOT put production secrets in this file.
+#
+# Required:
+#   RESEND_API_KEY      — used by /api/subscribe to send confirm-link email
+#   PUBLISH_FROM_EMAIL  — verified Resend sender, e.g. ahmad@openmark.dev
+#   PUBLISH_BASE_URL    — the site's canonical URL, e.g. https://openmark.dev
+#   PUBLICATION_NAME    — branded sender name, e.g. "OpenMark"
+[vars]
+PUBLICATION_NAME = "OpenMark"

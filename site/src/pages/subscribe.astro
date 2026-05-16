@@ -1,12 +1,35 @@
 ---
 import BaseLayout from '../layouts/BaseLayout.astro';
 import SubscribeForm from '../components/SubscribeForm.astro';
+
+const status = Astro.url.searchParams.get('status');
+const reason = Astro.url.searchParams.get('reason') || '';
+
+const banner = (() => {
+  switch (status) {
+    case 'sent':
+      return { tone: 'ok', text: '✉  Check your inbox — click the confirm link to finish.' };
+    case 'already':
+      return { tone: 'ok', text: "✓ You're already subscribed. No further action needed." };
+    case 'error':
+      return { tone: 'err', text: `Something went wrong (${reason}). Try again, or email ahmad@openmark.dev.` };
+    default:
+      return null;
+  }
+})();
 ---
 <BaseLayout title="Subscribe to OpenMark" description="Weekly drops from a curated knowledge graph.">
   <h1 class="text-3xl font-bold text-ink mb-2">Subscribe</h1>
   <p class="text-muted mb-6">
     One email a week. Sometimes two. Signal only.
   </p>
+
+  {banner && (
+    <div class={`mb-6 px-4 py-3 rounded-md text-sm ${banner.tone === 'ok' ? 'bg-panel border border-rule text-ink' : 'bg-red-50 border border-red-200 text-red-800'}`}>
+      {banner.text}
+    </div>
+  )}
+
   <SubscribeForm />
   <div class="mt-12 pt-6 border-t border-rule text-sm text-muted">
     <p class="mb-2"><strong class="text-ink">How it works:</strong></p>
