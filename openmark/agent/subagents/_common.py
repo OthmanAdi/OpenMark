@@ -31,6 +31,7 @@ from langchain.agents.middleware import (
     ToolRetryMiddleware,
 )
 from langchain.agents.structured_output import ToolStrategy
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool as _tool_decorator
 from langchain_core.language_models.chat_models import BaseChatModel
 from pydantic import BaseModel
@@ -120,6 +121,46 @@ def _count_tool_calls(messages: list) -> int:
     return n
 
 
+# Patterns that look like a model-side safety / capability refusal. When the
+# sub-agent emits one of these as its FINAL answer, the orchestrator would
+# otherwise lose every tool result the sub-agent collected. We surface the raw
+# tool messages in the orchestrator-visible blob so the outer model (which
+# may have a different safety profile) can synthesize from primary data.
+_REFUSAL_MARKERS = (
+    "i'm sorry, but i cannot assist",
+    "i cannot assist with that",
+    "i can't help with that",
+    "i'm unable to",
+    "i am unable to",
+    "i can't comply",
+    "i cannot comply",
+    "i won't be able to",
+    "sorry, but i cannot",
+)
+
+
+def _looks_like_refusal(text: str) -> bool:
+    low = (text or "").lower()
+    return any(m in low for m in _REFUSAL_MARKERS)
+
+
+def _compact_tool_messages(
+    messages: list, *, keep: int = 6, per_msg_cap: int = 1200,
+) -> list[tuple[str, str]]:
+    """Return the last `keep` ToolMessages as (tool_name, compacted_content)."""
+    out: list[tuple[str, str]] = []
+    for m in messages:
+        if isinstance(m, ToolMessage) or getattr(m, "type", "") == "tool":
+            name = getattr(m, "name", None) or "?"
+            content = getattr(m, "content", "") or ""
+            if not isinstance(content, str):
+                content = str(content)
+            if len(content) > per_msg_cap:
+                content = content[:per_msg_cap].rstrip() + f"\n…(+{len(content) - per_msg_cap} chars)"
+            out.append((name, content))
+    return out[-keep:]
+
+
 def format_for_orchestrator(
     *,
     role: str,
@@ -127,6 +168,8 @@ def format_for_orchestrator(
     duration_ms: float,
     include_structured: bool = True,
     text_char_cap: int = 6_000,
+    tool_results_keep: int = 6,
+    tool_results_per_cap: int = 1_200,
 ) -> str:
     """
     Render a sub-agent result for the orchestrator's view.
@@ -139,6 +182,14 @@ def format_for_orchestrator(
 
         STRUCTURED_RESPONSE:
         <JSON dump if present>
+
+        RAW TOOL RESULTS (last K, each capped):
+        --- <tool_name> ---
+        <compacted content>
+
+    The raw tool results are ALWAYS included so that when the sub-agent's
+    inner model refuses for safety reasons (or returns empty text), the
+    orchestrator still receives the primary data and can synthesize itself.
     """
     messages = (result or {}).get("messages", []) or []
     text = _final_text(messages) or "(no textual response)"
@@ -146,7 +197,12 @@ def format_for_orchestrator(
         text = text[:text_char_cap].rstrip() + f"\n\n…(truncated; full length {len(text)} chars)"
 
     n_calls = _count_tool_calls(messages)
-    header = f"[subagent={role} tool_calls={n_calls} duration={int(duration_ms)}ms]"
+    refusal = _looks_like_refusal(text)
+    header = (
+        f"[subagent={role} tool_calls={n_calls} duration={int(duration_ms)}ms"
+        + (" refusal=true" if refusal else "")
+        + "]"
+    )
 
     body = [header, text]
     if include_structured:
@@ -160,6 +216,21 @@ def format_for_orchestrator(
                 except Exception:
                     payload = str(sr)
             body.append("\nSTRUCTURED_RESPONSE:\n" + payload)
+
+    # Always surface raw tool results so refusals don't lose primary data.
+    tool_pairs = _compact_tool_messages(
+        messages, keep=tool_results_keep, per_msg_cap=tool_results_per_cap,
+    )
+    if tool_pairs:
+        body.append(f"\nRAW TOOL RESULTS (last {len(tool_pairs)} of {n_calls}):")
+        for name, content in tool_pairs:
+            body.append(f"\n--- {name} ---\n{content}")
+        if refusal:
+            body.append(
+                "\nNOTE: the sub-agent's inner model refused. Use the raw tool "
+                "results above to synthesize an answer for the user."
+            )
+
     return "\n".join(body).strip()
 
 
