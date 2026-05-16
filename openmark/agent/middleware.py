@@ -30,6 +30,7 @@ walkthrough.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import sys
 import time
@@ -61,7 +62,17 @@ from openmark.agent import skills as skill_loader
 
 # ── Tool event bus ────────────────────────────────────────────────────────────
 # Each entry: {ts, thread_id, phase, tool, args, duration_ms, result_preview, error}
-_TOOL_EVENTS: "deque[dict]" = deque(maxlen=400)
+_TOOL_EVENTS: "deque[dict]" = deque(maxlen=800)
+
+
+# Parent thread_id propagation. When the orchestrator's tool_event_middleware
+# fires for a task_* delegator tool, it sets this context var. The sub-agent
+# runs synchronously inside that handler, and its own (nested) tool_event
+# middleware reads the var so every internal tool event lands on the parent's
+# thread, drains together with orchestrator events, and shows up in the UI.
+_PARENT_THREAD_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "openmark_parent_thread_id", default=None
+)
 
 
 def _emit(thread_id: str, phase: str, **fields: Any) -> None:
@@ -223,16 +234,28 @@ def tool_event_middleware(request: Any, handler: Callable[[Any], Any]) -> Any:
     tool_args = tc.get("args", {}) if isinstance(tc, dict) else {}
     tool_id = tc.get("id", "") if isinstance(tc, dict) else ""
 
-    thread_id = "default"
+    # Resolve thread_id: prefer the request's config (orchestrator turn),
+    # fall back to the parent contextvar (nested sub-agent tool call), then
+    # to the literal 'default'. Nested events MUST land on the parent's
+    # thread so the UI's drain_events(thread_id=<sess-X>) picks them up.
+    thread_id = None
     try:
         runtime = getattr(request, "runtime", None)
         cfg = getattr(runtime, "config", None) or getattr(request, "config", None) or {}
         if isinstance(cfg, dict):
-            thread_id = cfg.get("configurable", {}).get("thread_id", "default")
+            thread_id = cfg.get("configurable", {}).get("thread_id")
     except Exception:
         pass
+    if not thread_id:
+        thread_id = _PARENT_THREAD_ID.get()
+    if not thread_id:
+        thread_id = "default"
 
-    log.info(f"[tool→] {tool_name} args={tool_args!r}")
+    # Bind the resolved thread_id so any synchronous sub-agent invocation
+    # inside the handler inherits it via _PARENT_THREAD_ID.
+    token = _PARENT_THREAD_ID.set(thread_id)
+
+    log.info(f"[tool→] {tool_name} args={tool_args!r} thread={thread_id}")
     _emit(thread_id, "start", tool=tool_name, args=tool_args, tool_id=tool_id)
     t0 = time.time()
     try:
@@ -260,3 +283,7 @@ def tool_event_middleware(request: Any, handler: Callable[[Any], Any]) -> Any:
         _emit(thread_id, "error", tool=tool_name, args=tool_args, tool_id=tool_id,
               duration_ms=dur, error=str(e)[:600])
         raise
+    finally:
+        # ALWAYS restore the parent thread_id so the contextvar doesn't leak
+        # across turns or between concurrent invocations.
+        _PARENT_THREAD_ID.reset(token)

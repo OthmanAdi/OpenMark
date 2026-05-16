@@ -93,3 +93,54 @@ def test_orchestrator_state_has_intent_field():
     annotations = OrchestratorState.__annotations__
     assert "intent" in annotations
     assert "intent_source" in annotations
+    assert "named_skill" in annotations
+
+
+@pytest.mark.parametrize(
+    "text, expected_skill",
+    [
+        # The original bug — must be fixed
+        ("Ok well done, i need you to use teh niche skill pelase",      "niche-hunter"),
+        # Humanizer language variants
+        ("humanize in ar-egt",                                           "ar-egt"),
+        ("use the modern standard arabic humanizer",                     "ar-msa"),
+        ("use the levantine humanizer",                                  "ar-shami"),
+        # openmark-* family
+        ("weekly digest of this week",                                   "weekly-digest"),
+        ("run the deep research on agents",                              "deep-research"),
+        ("use newsletter-essay format please",                           "newsletter-essay"),
+        ("use the verifier skill",                                       "verifier"),
+        ("use the polisher please",                                      "polisher"),
+        ("apply the polish skill",                                       "polisher"),
+        ("bookmark-dive https://example.com",                            "bookmark-dive"),
+        ("repo research on owner/name",                                  "repo-research"),
+    ],
+)
+def test_named_skill_detection(text, expected_skill):
+    from openmark.agent.classification import _named_skill_in_text
+
+    assert _named_skill_in_text(text) == expected_skill
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "find me my best langchain bookmarks",
+        "just a random question about RAG",
+        "what's the weather like",
+        "tell me about agents",
+        "",
+    ],
+)
+def test_named_skill_no_false_positives(text):
+    from openmark.agent.classification import _named_skill_in_text
+
+    assert _named_skill_in_text(text) is None
+
+
+def test_preload_named_skill_is_middleware():
+    """Ship a second @before_model that injects the named skill body."""
+    from langchain.agents.middleware import AgentMiddleware
+    from openmark.agent.classification import preload_named_skill
+
+    assert isinstance(preload_named_skill, AgentMiddleware)

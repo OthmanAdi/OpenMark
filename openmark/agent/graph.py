@@ -45,6 +45,7 @@ from openmark.agent.classification import (
     OrchestratorState,
     classify_intent,
     dynamic_orchestrator_prompt,
+    preload_named_skill,
 )
 from openmark.agent.llms import build_orchestrator, build_summarizer
 from openmark.agent.middleware import (
@@ -102,9 +103,14 @@ def build_agent():
     orchestrator_tools = list(ALL_SUBAGENT_TOOLS) + [write_skill]
 
     middleware = [
-        # 1. Classify intent ONCE per thread.
+        # 1. Classify intent ONCE per thread. ALSO detects user-named skills
+        #    (e.g. "use the niche skill", "polish this", "humanize in ar-egt")
+        #    and stores the matched short_name in state.
         classify_intent,
-        # 2. Dynamic prompt — reads intent label, injects matching system prompt.
+        # 2. If a skill was named in plain English, pre-load its SKILL.md
+        #    body as a SystemMessage so the orchestrator MUST follow it.
+        preload_named_skill,
+        # 3. Dynamic prompt — reads intent + named_skill, injects matching system prompt.
         dynamic_orchestrator_prompt,
         # 3. Trim bulky tool outputs (sub-agent results can be large).
         ContextEditingMiddleware(

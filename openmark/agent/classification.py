@@ -20,8 +20,10 @@ import re
 import time
 from typing import Any, Literal
 
+from functools import lru_cache
+
 from langchain.agents.middleware import AgentState, before_model, dynamic_prompt, ModelRequest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from openmark.agent import skills as _skill_loader
@@ -46,6 +48,7 @@ class OrchestratorState(AgentState):
 
     intent: str | None
     intent_source: str | None
+    named_skill: str | None      # short_name of a skill the user named explicitly
 
 
 # ── Slash + heuristic helpers ───────────────────────────────────────────────
@@ -88,6 +91,92 @@ def _slash_intent(text: str) -> Intent | None:
     if short.startswith("openmark-"):
         short = short[len("openmark-"):]
     return _SLASH_TO_INTENT.get(short)
+
+
+# ── Plain-English skill detection ───────────────────────────────────────────
+#
+# Catches phrases like "use the niche skill", "run polisher", "with newsletter-roundup",
+# "humanize this in ar-egt", "verify the draft", "weekly digest please" — anywhere a
+# user names a known skill without a leading slash. Returns the matched short_name.
+
+_SKILL_VERB_RE = re.compile(
+    r"\b(use|using|load|loading|run|running|invoke|invoking|"
+    r"apply|applying|trigger|triggering|call|with|via|through)\b",
+    re.IGNORECASE,
+)
+_SKILL_TRAILING_NOUN_RE = re.compile(r"\bskill\b", re.IGNORECASE)
+
+
+# Short-name aliases — covers humanizer language variants, multi-word forms,
+# and short keywords that still uniquely point to one family.
+# Keys MUST match the short_name produced by openmark.agent.skills._strip_known_prefix
+# (which strips the openmark- / humanizer- / agent-generated- prefix).
+_SKILL_ALIASES: dict[str, list[str]] = {
+    # ── openmark-* family (short_name = "newsletter", "deep-research", etc) ──
+    "newsletter":            ["newsletter"],
+    "newsletter-essay":      ["newsletter-essay", "essay newsletter", "essay-newsletter"],
+    "newsletter-roundup":    ["newsletter-roundup", "roundup", "roundup newsletter"],
+    "newsletter-thread":     ["newsletter-thread", "thread newsletter", "linkedin thread", "linkedin post"],
+    "newsletter-comparison": ["newsletter-comparison", "comparison newsletter", "side-by-side"],
+    "deep-research":         ["deep-research", "deep research"],
+    "fast-search":           ["fast-search", "fast search", "quick search"],
+    "weekly-digest":         ["weekly-digest", "weekly digest"],
+    "bookmark-dive":         ["bookmark-dive", "bookmark dive", "dive into"],
+    "repo-research":         ["repo-research", "repo research", "github research"],
+    "niche-hunter":          ["niche-hunter", "niche hunter", "niche skill", "niche"],
+    "polisher":              ["polisher", "polish skill"],
+    "verifier":              ["verifier", "verify skill"],
+    # ── humanizer-* family (short_name strips the 'humanizer-' prefix) ──
+    "ar-egt":                ["ar-egt", "egyptian arabic", "egyptian humanizer"],
+    "ar-msa":                ["ar-msa", "modern standard arabic", "msa"],
+    "ar-shami":              ["ar-shami", "levantine arabic", "levantine humanizer", "shami"],
+    "he":                    ["humanizer-he", "hebrew humanizer", "he humanizer"],
+}
+
+
+@lru_cache(maxsize=1)
+def _alias_lookup() -> list[tuple[str, str]]:
+    """Build (alias_lower, short_name) pairs. Sort by alias length desc so
+    'newsletter-essay' beats 'newsletter' on the same text."""
+    pairs: list[tuple[str, str]] = []
+    known_short = {s["short_name"] for s in _skill_loader.list_skills()}
+    for short_name, aliases in _SKILL_ALIASES.items():
+        if short_name not in known_short:
+            continue
+        for a in aliases:
+            pairs.append((a.lower(), short_name))
+    pairs.sort(key=lambda p: len(p[0]), reverse=True)
+    return pairs
+
+
+def _named_skill_in_text(text: str) -> str | None:
+    """
+    Find an explicitly-named skill in plain English. Returns the short_name
+    of the longest matching alias, or None.
+
+    Rules to avoid false positives:
+      1. The alias must appear as a whole-word match (word boundaries).
+      2. AND at least one of:
+         (a) message contains a 'use|load|run|with|via|apply|call' verb,
+         (b) message contains the trailing noun 'skill',
+         (c) the alias itself is multi-word or unambiguous
+             (e.g. 'newsletter-essay', 'weekly digest', 'deep research').
+    """
+    if not text or not text.strip():
+        return None
+    low = text.lower()
+    has_verb = bool(_SKILL_VERB_RE.search(low))
+    has_trailing_noun = bool(_SKILL_TRAILING_NOUN_RE.search(low))
+    for alias, short_name in _alias_lookup():
+        if re.search(rf"\b{re.escape(alias)}\b", low):
+            unambiguous = ("-" in alias or " " in alias)
+            if unambiguous or has_verb or has_trailing_noun:
+                return short_name
+    return None
+
+
+def _skill_to_intent(short_name: str) -> Intent:
+    return _SLASH_TO_INTENT.get(short_name, "fast")
 
 
 def _heuristic_intent(text: str) -> Intent | None:
@@ -162,27 +251,84 @@ def _last_human_text(messages: list) -> str:
 @before_model(state_schema=OrchestratorState)
 def classify_intent(state: OrchestratorState, runtime: Any) -> dict | None:
     """
-    Sticky classifier. Sets state['intent'] + state['intent_source'] exactly
-    once per thread. Subsequent turns short-circuit since the label is set.
+    Resolves intent for the FIRST turn of a thread. Subsequent turns
+    short-circuit. Detection order, cheapest first:
+
+      0. Named skill in plain English (catches "use the niche skill",
+         "polish this", "humanize in ar-egt", etc). Sets BOTH `intent` AND
+         `named_skill` so the orchestrator pre-loader will inject the body.
+      1. Slash command.
+      2. Regex heuristic.
+      3. Fast LLM classifier.
     """
     if state.get("intent"):
         return None
     msg = _last_human_text(state.get("messages") or [])
     if not msg.strip():
         return None
+
+    # 0) Explicit skill named in plain English
+    named = _named_skill_in_text(msg)
+    if named:
+        intent = _skill_to_intent(named)
+        log.info(f"[classify] named-skill -> {named} (intent={intent})")
+        return {"intent": intent, "intent_source": "named_skill", "named_skill": named}
+
     # 1) Slash
     label = _slash_intent(msg)
     if label:
         log.info(f"[classify] slash -> {label}")
         return {"intent": label, "intent_source": "slash"}
+
     # 2) Heuristic
     label = _heuristic_intent(msg)
     if label:
         log.info(f"[classify] heuristic -> {label}")
         return {"intent": label, "intent_source": "heuristic"}
+
     # 3) LLM
     label = _llm_classify(msg) or "fast"
     return {"intent": label, "intent_source": "llm"}
+
+
+# ── before_model: skill body pre-loader ─────────────────────────────────────
+
+
+_NAMED_SKILL_MARKER = "<!-- openmark-named-skill-preloaded -->"
+
+
+@before_model(state_schema=OrchestratorState)
+def preload_named_skill(state: OrchestratorState, runtime: Any) -> dict | None:
+    """
+    If `classify_intent` flagged a named skill, eagerly inject its SKILL.md
+    body as a SystemMessage AND mark the message stream so the orchestrator
+    knows the skill was already loaded. Idempotent via marker.
+    """
+    named = state.get("named_skill")
+    if not named:
+        return None
+    messages = state.get("messages") or []
+    # Idempotent: skip if we already injected
+    for m in messages:
+        if getattr(m, "type", "") != "system":
+            continue
+        content = getattr(m, "content", "")
+        if isinstance(content, str) and _NAMED_SKILL_MARKER in content:
+            return None
+    skill = _skill_loader.load_skill(named)
+    if not skill:
+        log.info(f"[preload_named_skill] '{named}' not found on disk; skipped")
+        return None
+    log.info(f"[preload_named_skill] injecting body of skill={skill['name']} "
+             f"({len(skill['body'])} chars)")
+    preamble = SystemMessage(content=(
+        f"# Active skill — user named '{named}'\n"
+        f"{_NAMED_SKILL_MARKER}\n\n"
+        "The user explicitly requested this skill. Follow this recipe verbatim "
+        "for the user's request. You do NOT need to call load_skill again.\n\n"
+        f"---\n\n{skill['body']}"
+    ))
+    return {"messages": [preamble] + list(messages)}
 
 
 # ── dynamic_prompt — orchestrator system prompt with intent hint ────────────
@@ -192,6 +338,14 @@ _ORCHESTRATOR_BASE_PROMPT = """You are OpenMark — Ahmad's personal AI orchestr
 
 Your job: take Ahmad's request, plan, delegate to the RIGHT sub-agents, then
 return a tight, grounded final answer.
+
+NAMED-SKILL DIRECTIVE (HIGHEST PRIORITY)
+If the user names ANY skill (e.g. "use the niche skill", "polish this",
+"humanize in ar-egt", "/newsletter-essay", "weekly digest please", "deep
+research on X", "bookmark-dive https://..."), the matching SKILL.md body is
+pre-loaded as a SystemMessage by the harness. You MUST follow that recipe
+verbatim. Do NOT default to a generic compose loop. Do NOT skip steps the
+named skill spells out. The user's named skill is non-negotiable.
 
 You have ZERO retrieval tools yourself. Every search / fetch goes through
 `task_researcher`. Every composition goes through `task_compose_*`. Every
@@ -249,6 +403,7 @@ _INTENT_HINTS: dict[str, str] = {
 @dynamic_prompt
 def dynamic_orchestrator_prompt(request: ModelRequest) -> str:
     intent = request.state.get("intent") or "fast"
+    named = request.state.get("named_skill")
     try:
         from openmark.stores import neo4j_store
         s = neo4j_store.get_stats()
@@ -262,4 +417,11 @@ def dynamic_orchestrator_prompt(request: ModelRequest) -> str:
         bookmarks=bookmarks, tags=tags, categories=categories, communities=communities,
     )
     hint = _INTENT_HINTS.get(intent, _INTENT_HINTS["fast"])
-    return base + "\n\n" + hint
+    out = base + "\n\n" + hint
+    if named:
+        out += (
+            f"\n\nNAMED SKILL ACTIVE: '{named}'. The full SKILL.md body has "
+            "ALREADY been injected as a SystemMessage above. Follow it verbatim. "
+            "Do not call load_skill again for this skill."
+        )
+    return out
