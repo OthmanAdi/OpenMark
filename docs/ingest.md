@@ -1,6 +1,6 @@
-# Ingest Pipeline
+# Ingest Pipeline (v3 — Neo4j only)
 
-The ingest pipeline is the heart of OpenMark. It merges all your data, embeds everything, and writes to both ChromaDB and Neo4j.
+The ingest pipeline is the heart of OpenMark. It merges every source, embeds each item, and writes a Neo4j Graph RAG store with vector index + tag co-occurrence + SIMILAR_TO neighbors + optional Louvain communities. ChromaDB was removed in v3.
 
 ---
 
@@ -12,143 +12,89 @@ python scripts/ingest.py [options]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--provider local` | from `.env` | Use local pplx-embed models |
-| `--provider azure` | from `.env` | Use Azure AI Foundry embeddings |
 | `--fresh-raindrop` | off | Also pull live from Raindrop API during merge |
-| `--skip-similar` | off | Skip SIMILAR_TO edge computation (saves ~30 min) |
+| `--skip-similar`   | off | Skip SIMILAR_TO edge computation (saves ~25-40 min) |
+| `--skip-louvain`   | off | Skip Louvain community detection (requires GDS plugin) |
+
+Provider comes from `.env` (`EMBEDDING_PROVIDER`). No `--provider` flag.
 
 ---
 
-## Pipeline Steps
+## Pipeline steps
 
 ### Step 1 — Merge
 
-Loads and deduplicates all sources:
+Loads and deduplicates every source:
 - `CATEGORIZED.json` — pre-categorized bookmarks from Edge + Raindrop + daily.dev
 - `linkedin_saved.json` — LinkedIn saved posts
-- `youtube_MASTER.json` — liked videos, watch later, playlists (not subscriptions)
+- `youtube_MASTER.json` — liked videos, watch-later, playlists (not subscriptions)
 
-Deduplication is URL-based (case-insensitive, trailing slash stripped). If the same URL appears in multiple sources, the first occurrence wins.
+Deduplication is URL-based (case-insensitive, trailing slash stripped). First occurrence wins.
 
 Each item gets a `doc_text` field built for embedding:
 ```
 {title} | {category} | {tag1 tag2 tag3} | {content/excerpt/channel}
 ```
-This rich text is what gets embedded — not just the title.
 
-**Output:** ~8,000 normalized items in memory.
-
----
+Rich text is what gets embedded, not just the title.
 
 ### Step 2 — Embedding
 
-Loads the embedding provider specified by `EMBEDDING_PROVIDER` in `.env` (or `--provider` flag).
+Loads the embedding provider specified by `EMBEDDING_PROVIDER` in `.env`.
 
-**Local (pplx-embed):**
-- Query model: `perplexity-ai/pplx-embed-v1-0.6b` — used for user search queries
-- Document model: `perplexity-ai/pplx-embed-context-v1-0.6b` — used for bookmark documents
+**Local pplx-embed (recommended):**
+- Query model: `pplx-embed-v1-0.6b` for user queries
+- Document model: `pplx-embed-context-v1-0.6b` for bookmark documents
 - Output dimension: 1024
-- Downloaded once to HuggingFace cache (~1.2 GB total), free on every subsequent run
-- **Known compatibility issue:** pplx-embed requires `sentence-transformers==3.3.1` and two runtime patches (applied automatically in `local.py`). See [troubleshooting.md](troubleshooting.md) for details.
+- Downloaded once to HuggingFace cache (~1.2 GB total)
+- Known compatibility patches applied in `openmark/embeddings/local.py`; see [troubleshooting.md](troubleshooting.md).
 
 **Azure:**
-- Uses `text-embedding-ada-002` (or configured `AZURE_DEPLOYMENT_EMBED`)
-- Output dimension: 1536
-- Cost: ~€0.30 for 8,000 items (as of 2026)
-- Batched in groups of 100 with progress logging
+- Uses `AZURE_DEPLOYMENT_EMBED` (default `text-embedding-3-large`, 1536 dim if you pick that; or 1024 dim with `text-embedding-3-small`)
+- Cost: a few cents per 1K items (varies by deployment)
+- Batched, with progress logging
 
----
+### Step 3 — Neo4j ingest
 
-### Step 3 — ChromaDB Ingest
+Single-store write. Each batch of ~200 items writes nodes + edges via `MERGE` (idempotent).
 
-Embeds all documents in batches of 100 and stores in ChromaDB.
+**Nodes:**
+- `Bookmark` — `url, title, score, source, category, created_at, embedding[1024]`
+- `Category`, `Tag`, `Source`, `Domain`
 
-- Skips items already in ChromaDB (resumable — safe to re-run)
-- Stores: URL (as ID), embedding vector, title, category, source, score, tags
-- Uses cosine similarity space (`hnsw:space: cosine`)
-- Database written to disk at `CHROMA_PATH` (default: `OpenMark/data/chroma_db/`)
-
-**Timing:**
-| Provider | 8K items | Notes |
-|----------|----------|-------|
-| Local pplx-embed (CPU) | ~20 min | No GPU detected = CPU inference |
-| Local pplx-embed (GPU) | ~3 min | NVIDIA GPU with CUDA |
-| Azure AI Foundry | ~5 min | Network bound |
-
----
-
-### Step 4 — Neo4j Ingest
-
-Creates nodes and relationships in batches of 200.
-
-**Nodes created:**
-- `Bookmark` — url, title, score
-- `Category` — name
-- `Tag` — name
-- `Source` — name (raindrop, linkedin, youtube_liked, edge, dailydev, etc.)
-- `Domain` — extracted from URL (e.g. `github.com`, `medium.com`)
-
-**Relationships created:**
+**Relationships:**
 - `(Bookmark)-[:IN_CATEGORY]->(Category)`
 - `(Bookmark)-[:TAGGED]->(Tag)`
 - `(Bookmark)-[:FROM_SOURCE]->(Source)`
 - `(Bookmark)-[:FROM_DOMAIN]->(Domain)`
-- `(Tag)-[:CO_OCCURS_WITH {count}]-(Tag)` — built after all nodes are written
+- `(Tag)-[:CO_OCCURS_WITH {count}]-(Tag)` — built after all bookmarks are in
 
-**Timing:** ~3-5 minutes for 8K items.
+Vector index `bookmark_embedding` on `b.embedding` powers semantic search.
 
-**Idempotent:** Uses `MERGE` everywhere — safe to re-run, won't create duplicates.
+### Step 4 — SIMILAR_TO edges (skippable)
+
+For each Bookmark, queries the Neo4j vector index for its top-5 nearest neighbors and writes `(:Bookmark)-[:SIMILAR_TO {score}]->(:Bookmark)` edges.
+
+| Setup | 13k items | Notes |
+|---|---|---|
+| Neo4j vector index | ~10-15 min | Native to Neo4j 5.13+ |
+| --skip-similar | 0 min | Skip; recoverable later |
+
+### Step 5 — Louvain communities (skippable)
+
+If the Neo4j GDS plugin is installed, runs Louvain on a similarity sub-graph and writes `(:Bookmark)-[:IN_COMMUNITY]->(:Community)` edges. Skipped automatically if GDS is missing.
 
 ---
 
-### Step 5 — SIMILAR_TO Edges
+## Re-running
 
-This is the most powerful and most time-consuming step.
+`MERGE` everywhere → safe to re-run. The pipeline:
 
-For each of the 8K bookmarks, OpenMark queries ChromaDB for its top-5 nearest semantic neighbors and writes those as `SIMILAR_TO` edges in Neo4j with a similarity score.
+- Skips already-embedded URLs based on the existing `b.embedding` property
+- Recomputes SIMILAR_TO and CO_OCCURS_WITH from scratch (cheap)
+- Refreshes Louvain communities
 
-```
-(Bookmark {url: "...langchain-docs..."})-[:SIMILAR_TO {score: 0.94}]->(Bookmark {url: "...langgraph-tutorial..."})
-```
-
-These edges encode **semantic connections you never manually created**. The knowledge graph becomes a web of meaning, not just a web of tags.
-
-**Timing:** ~25-40 minutes on CPU for 8K items. This is the longest step.
-
-**Skip it if you're in a hurry:**
+To force a full re-embed (e.g. after switching providers):
 ```bash
-python scripts/ingest.py --skip-similar
-```
-Everything else works without SIMILAR_TO edges. You only lose the `find_similar_bookmarks` tool in the agent and the graph traversal from those edges.
-
-**Only edges with similarity > 0.5 are written.** Low-quality connections are discarded.
-
----
-
-## Re-running the Pipeline
-
-The pipeline is safe to re-run at any time:
-
-- **ChromaDB:** skips already-ingested URLs automatically
-- **Neo4j:** uses `MERGE` — no duplicates created
-- **SIMILAR_TO:** edges are overwritten (not duplicated) via `MERGE`
-
-To add new bookmarks after the first run:
-1. Update your source files (fresh Raindrop pull, new LinkedIn export, etc.)
-2. Run `python scripts/ingest.py` — only new items get embedded and stored
-
----
-
-## Checking What's Ingested
-
-```bash
-# Quick stats
-python scripts/search.py --stats
-
-# Search to verify
-python scripts/search.py "RAG tools"
-
-# Neo4j — open browser
-# http://localhost:7474
-# Run: MATCH (b:Bookmark) RETURN count(b)
+python scripts/fresh_reembed.py
 ```

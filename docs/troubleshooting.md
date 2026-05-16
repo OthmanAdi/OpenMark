@@ -82,25 +82,25 @@ Update `NEO4J_DATABASE` in `.env` to match.
 
 ---
 
-## ChromaDB ingest is slow
+## Embedding pass is slow
 
-On CPU with local pplx-embed, embedding 8K items takes ~20 minutes. This is normal.
+On CPU with local pplx-embed, embedding 13K items takes ~30 minutes. This is normal.
 
 **Options:**
-- Use Azure instead: `python scripts/ingest.py --provider azure` (~5 min, ~€0.30)
-- The ingest is resumable — if interrupted, re-run and it skips already-ingested items
+- Set `EMBEDDING_PROVIDER=azure` in `.env` and rerun (~5 min, a few cents)
+- Ingest is resumable. The pipeline skips bookmarks that already have `b.embedding` set in Neo4j
 
 ---
 
 ## SIMILAR_TO step takes too long
 
-Building SIMILAR_TO edges queries ChromaDB for every bookmark's top-5 neighbors, then writes to Neo4j. For 8K items on CPU this takes ~25-40 minutes.
+Building SIMILAR_TO edges queries the Neo4j vector index for every bookmark's top-5 neighbors and writes the edges back. For 13K items this takes ~10-15 minutes on a modern machine.
 
 **Skip it:**
 ```bash
 python scripts/ingest.py --skip-similar
 ```
-The app works without SIMILAR_TO edges. You only lose the `find_similar_bookmarks` agent tool and cross-topic graph traversal.
+The app works without SIMILAR_TO edges. You only lose `graph_expand` and cross-topic SIMILAR_TO traversal in the researcher sub-agent. Re-run later without `--skip-similar` to backfill.
 
 ---
 

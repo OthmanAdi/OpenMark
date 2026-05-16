@@ -1,188 +1,260 @@
-# Architecture
+# Architecture (v3)
 
 ## Overview
 
-OpenMark uses a **dual-store architecture** — two databases working together, each doing what it's best at.
+OpenMark v3 is a single-store, single-orchestrator system. **Neo4j Graph RAG** holds every bookmark with a 1024-dim vector index, tag co-occurrence edges, Louvain communities, and SIMILAR_TO neighbor edges. A LangChain v1 `create_agent` orchestrator on Azure AI Foundry delegates work to 10 specialist sub-agents via pure middleware.
+
+ChromaDB and deepagents were both removed in v3. Everything middleware-related now comes from `langchain.agents.middleware`.
 
 ```
-                        User Query
-                            │
-                    LangGraph Agent
-                    (gpt-4o-mini)
-                   /              \
-          ChromaDB               Neo4j
-        (vector store)        (graph store)
-
-        "find by meaning"     "find by connection"
-        "what's similar?"     "how are things linked?"
-```
-
----
-
-## Embedding Layer
-
-The embedding layer is **provider-agnostic** — swap between local and cloud with one env var.
-
-```
-EMBEDDING_PROVIDER=local   →  LocalEmbedder  (pplx-embed, runs on your machine)
-EMBEDDING_PROVIDER=azure   →  AzureEmbedder  (Azure AI Foundry, API call)
-```
-
-**Why two pplx-embed models?**
-
-Perplexity AI ships two variants:
-- `pplx-embed-v1-0.6b` — for encoding **queries** (what the user types)
-- `pplx-embed-context-v1-0.6b` — for encoding **documents** (the bookmarks, surrounding context matters)
-
-Using the correct model for each role improves retrieval quality. Most implementations use one model for both — this is the correct production pattern.
-
-**The compatibility patches:**
-
-pplx-embed models ship with custom Python code (`st_quantize.py`) that has two incompatibilities with modern libraries:
-
-1. **`sentence_transformers 4.x` removed the `Module` base class** — pplx-embed's code imports it. Fixed by aliasing `torch.nn.Module` to `sentence_transformers.models.Module` before import.
-
-2. **`transformers 4.57` added `list_repo_templates()`** — it looks for an `additional_chat_templates` folder in every model repo. pplx-embed doesn't have one, causing a hard 404 crash. Fixed by monkey-patching the function to return an empty list on exception.
-
-Both patches are applied in `openmark/embeddings/local.py` before any model loading.
-
-**Why `sentence-transformers==3.3.1` specifically?**
-
-Version 4.x removed the `Module` base class that pplx-embed depends on. Pin to 3.3.1.
-
----
-
-## ChromaDB
-
-Local, file-based vector database. No server, no API key, no cloud.
-
-**Collection:** `openmark_bookmarks`
-**Similarity metric:** cosine
-**Data path:** `CHROMA_PATH` in `.env` (default: `OpenMark/data/chroma_db/`)
-
-**What's stored per item:**
-```python
-{
-    "id":       url,           # primary key
-    "document": doc_text,      # rich text used for embedding
-    "metadata": {
-        "title":    str,
-        "category": str,
-        "source":   str,       # raindrop, linkedin, youtube_liked, edge, etc.
-        "score":    float,     # quality score 1-10
-        "tags":     str,       # comma-separated
-        "folder":   str,
-    },
-    "embedding": [float x 1024]  # or 1536 for Azure
-}
-```
-
-**Querying:**
-```python
-collection.query(
-    query_embeddings=[embedder.embed_query("RAG tools")],
-    n_results=10,
-    where={"category": {"$eq": "RAG & Vector Search"}},  # optional filter
-)
+                  User query (Gradio Chat tab or CLI)
+                                │
+                       Orchestrator (one create_agent graph)
+                                │
+                ┌───────────────┼───────────────┐
+                │               │               │
+        classify_intent   dynamic_prompt    14 middleware
+        (@before_model)  (@dynamic_prompt)  (langchain v1)
+                                │
+                 task_* tools (10 sub-agent delegators)
+                                │
+   ┌──────────────┬─────────────┼─────────────┬──────────────┐
+   │              │             │             │              │
+researcher    composer_*   humanizer      polisher       verifier
+(21 tools)   (0 tools,    (ar-* / he,   (en, ai-tell    (Pydantic
+              ToolStrategy  loads        scrub)         VerificationReport)
+              schemas)      humanizer-*
+                            skill)
+                                │
+                          Neo4j Graph RAG
+                          + web (Tavily / Brave / DDG /
+                                 GitHub / Reddit)
 ```
 
 ---
 
-## Neo4j Graph Schema
+## Embedding layer
+
+Provider-agnostic. Swap with one env var.
 
 ```
-(:Bookmark {url, title, score})
+EMBEDDING_PROVIDER=pplx   →  LocalEmbedder (pplx-embed-context-v1-0.6b for docs,
+                                            pplx-embed-v1-0.6b for queries; 1024 dim)
+EMBEDDING_PROVIDER=azure  →  AzureEmbedder (text-embedding-3-large)
+```
+
+### Why two pplx-embed models?
+
+Perplexity ships matched query + doc encoders. Using the right model for each role measurably improves retrieval. Most public examples use one model for both — pplx ships a real production pattern.
+
+### Compatibility patches
+
+`openmark/embeddings/local.py` applies two monkey patches before model load:
+
+1. `sentence_transformers 4.x` removed `Module` base class that pplx-embed imports. We alias `torch.nn.Module` to `sentence_transformers.models.Module`.
+2. `transformers 4.57+` adds `list_repo_templates()` and 404s on pplx repos that lack `additional_chat_templates`. We patch the function to return `[]` on exception.
+
+Pin `sentence-transformers==3.3.1` (4.x is incompatible).
+
+---
+
+## Neo4j Graph RAG schema
+
+```
+(:Bookmark {url, title, score, source, category, created_at, embedding[1024]})
     -[:IN_CATEGORY]->   (:Category {name})
     -[:TAGGED]->        (:Tag {name})
     -[:FROM_SOURCE]->   (:Source {name})
     -[:FROM_DOMAIN]->   (:Domain {name})
-    -[:SIMILAR_TO {score}]->  (:Bookmark)  ← from embeddings
+    -[:IN_COMMUNITY]->  (:Community {id})         ← Louvain (GDS plugin)
+    -[:SIMILAR_TO {score}]->  (:Bookmark)         ← top-5 cosine neighbors
 
-(:Tag)-[:CO_OCCURS_WITH {count}]-(:Tag)    ← tags that appear together
+(:Tag)-[:CO_OCCURS_WITH {count}]-(:Tag)            ← tags co-saved on same bookmark
 ```
 
-**Useful Cypher queries:**
+Vector index: `bookmark_embedding` on `b.embedding`. Used by `SEARCH b IN (VECTOR INDEX bookmark_embedding ...)` Cypher constructs.
+
+### Useful Cypher
 
 ```cypher
-// Count everything
-MATCH (b:Bookmark) RETURN count(b) AS bookmarks
-MATCH (t:Tag) RETURN count(t) AS tags
+// Counts
+MATCH (b:Bookmark) RETURN count(b) AS bookmarks;
+MATCH (t:Tag)      RETURN count(t) AS tags;
 
-// Top categories
-MATCH (b:Bookmark)-[:IN_CATEGORY]->(c:Category)
-RETURN c.name, count(b) AS count ORDER BY count DESC
+// Vector search
+CALL () {
+  MATCH (b) SEARCH b IN (VECTOR INDEX bookmark_embedding FOR $embedding LIMIT 100) SCORE AS score
+  RETURN b, score LIMIT 10
+}
+OPTIONAL MATCH (b)-[:TAGGED]->(t:Tag)
+RETURN b.url, b.title, score, collect(t.name)[..6] AS tags
+ORDER BY score DESC;
 
-// All bookmarks tagged 'rag'
-MATCH (b:Bookmark)-[:TAGGED]->(t:Tag {name: 'rag'})
-RETURN b.title, b.url ORDER BY b.score DESC
+// Tag cluster (2 hops)
+MATCH (t:Tag {name: 'langchain'})-[:CO_OCCURS_WITH*1..2]-(r:Tag)
+RETURN r.name, count(*) AS strength ORDER BY strength DESC;
 
-// Find what connects to 'langchain' tag (2 hops)
-MATCH (t:Tag {name: 'langchain'})-[:CO_OCCURS_WITH*1..2]-(related:Tag)
-RETURN related.name, count(*) AS strength ORDER BY strength DESC
+// SIMILAR_TO from a URL
+MATCH (b:Bookmark {url: $url})-[r:SIMILAR_TO]-(o:Bookmark)
+RETURN o.title, o.url, r.score ORDER BY r.score DESC LIMIT 6;
 
-// Similar bookmarks to a URL
-MATCH (b:Bookmark {url: 'https://...'})-[r:SIMILAR_TO]-(other)
-RETURN other.title, other.url, r.score ORDER BY r.score DESC
-
-// Most connected domains
-MATCH (b:Bookmark)-[:FROM_DOMAIN]->(d:Domain)
-RETURN d.name, count(b) AS saved ORDER BY saved DESC LIMIT 20
+// Community peers
+MATCH (b:Bookmark {url: $url})-[:IN_COMMUNITY]->(c:Community)<-[:IN_COMMUNITY]-(peer:Bookmark)
+WHERE peer.url <> $url
+RETURN peer.title, peer.url LIMIT 6;
 ```
 
 ---
 
-## LangGraph Agent
+## The orchestrator (v3)
 
-Built with `create_react_agent` from LangGraph 1.0.x.
+`openmark/agent/graph.py`. Single `create_agent`, 14 middleware, 11 tools.
 
-**Model:** Azure gpt-4o-mini (streaming enabled)
-**Memory:** `MemorySaver` — conversation history persists per `thread_id` within a session
+### Middleware stack
 
-**Tools:**
+| # | Middleware | Source | Purpose |
+|---|---|---|---|
+| 1 | `classify_intent` | `openmark.agent.classification` (@before_model) | Slash → regex → fast LLM. Writes `state.intent` once per thread. |
+| 2 | `dynamic_orchestrator_prompt` | `openmark.agent.classification` (@dynamic_prompt) | Reads `state.intent`, injects matching system prompt with live KB stats. |
+| 3 | `ContextEditingMiddleware(ClearToolUsesEdit)` | langchain | Trims old tool outputs at 120k tokens, keeps last 4. |
+| 4 | `SummarizationMiddleware` | langchain | Triggers at 100k tokens / 80 messages, keeps last 24. Uses cheap summarizer. |
+| 5 | `TodoListMiddleware` | langchain | Adds `write_todos` so agent plans before fan-out. |
+| 6 | `ModelCallLimitMiddleware` | langchain | 30 model calls / turn hard cap. |
+| 7 | `ToolCallLimitMiddleware` | langchain | Global 40 + per-tool caps on expensive composers. |
+| 8 | `ModelRetryMiddleware` | langchain | 3 retries, exponential backoff. |
+| 9 | `slash_skill_loader` | `openmark.agent.middleware` (@before_model) | `/<skill>` pre-loads SKILL.md, strips slash. |
+| 10 | `OpenMarkSkillMiddleware` | `openmark.agent.middleware` | Skill catalogue + `load_skill` tool. |
+| 11 | `ToolRetryMiddleware` | langchain | 2 retries on flaky sub-agent calls. |
+| 12 | `tool_event_middleware` | `openmark.agent.middleware` (@wrap_tool_call) | Captures every tool start/end/error for UI cards. |
 
-| Tool | Store | Description |
-|------|-------|-------------|
-| `search_semantic` | ChromaDB | Natural language vector search |
-| `search_by_category` | ChromaDB | Filter by category + optional query |
-| `find_by_tag` | Neo4j | Exact tag lookup |
-| `find_similar_bookmarks` | Neo4j | SIMILAR_TO edge traversal |
-| `explore_tag_cluster` | Neo4j | CO_OCCURS_WITH traversal (2 hops) |
-| `get_stats` | Both | Count totals |
-| `run_cypher` | Neo4j | Raw Cypher for power users |
+Custom state schema: `OrchestratorState(AgentState)` adds `intent: str | None` and `intent_source: str | None`.
 
-**Agent routing:** The LLM decides which tool(s) to call based on the query. For "what do I know about RAG" it will call `search_semantic` + `search_by_category` + `find_by_tag`. For "how does LangGraph connect to my Neo4j saves" it will call `explore_tag_cluster` and `run_cypher`.
+Checkpointer: `SqliteSaver` at `data/openmark_agent.db` — threads survive restart.
+
+---
+
+## Sub-agents
+
+Each lives in its own file under `openmark/agent/subagents/` and is exposed to the orchestrator as a `task_<role>` tool. The tool body invokes a compiled `create_agent` graph (cached at module load) and formats the result for the orchestrator's view (compacted text + JSON of `structured_response` where applicable).
+
+| Sub-agent | Tools | response_format | Triggered by |
+|---|---|---|---|
+| `task_researcher` | 21 (15 graph + 6 web) | — | every retrieval path |
+| `task_compose_linkedin` | 0 | `LinkedInPost` | `/newsletter-thread`, "LinkedIn post on X" |
+| `task_compose_essay` | 0 | `NewsletterEssay` | `/newsletter-essay` |
+| `task_compose_roundup` | 0 | `NewsletterRoundup` | `/newsletter-roundup` |
+| `task_compose_comparison` | 0 | `NewsletterComparison` | `/newsletter-comparison` |
+| `task_compose_analytical` | 0 | `NewsletterAnalytical` | `/newsletter on X` (default) |
+| `task_humanize` | 0 | — | language = `ar-msa / ar-egt / ar-shami / he` |
+| `task_polish` | 0 | — | language = `en` |
+| `task_verify` | 0 | `VerificationReport` | post-compose retry-loop guard |
+| `task_author_skill` | `write_skill` | — | "bake this prompt into a reusable skill" |
+
+Sub-agents have their own middleware stack (`ContextEditingMiddleware`, `SummarizationMiddleware`, `ModelCallLimitMiddleware`, `ToolRetryMiddleware`, `tool_event_middleware`). The shared event bus means sub-agent tool calls appear in the same Gradio UI cards as the orchestrator's own calls.
+
+---
+
+## Classification flow
+
+`openmark/agent/classification.py`. Resolution order (cheapest to most expensive):
+
+```
+1. Slash command           /newsletter, /deep-research, /weekly-digest, ...
+                           → _SLASH_TO_INTENT lookup, no LLM call.
+2. Regex heuristic         "this week", "compare A and B", "expand <URL>", ...
+                           → _heuristic_intent, no LLM call.
+3. Fast LLM classifier     Fallback only. Uses gpt-4.1-mini (or whatever
+                           role_model_id('classifier') resolves to) with
+                           .with_structured_output(IntentLabel).
+```
+
+Sticky per thread: once `state.intent` is set, subsequent turns short-circuit. Intent labels: `fast | deep | newsletter | digest | dive`. The dynamic_prompt reads the label and appends a matching hint to the orchestrator system prompt.
+
+---
+
+## Foundry model bank
+
+`openmark/models/foundry.py` — typed registry of 25 frontier deployments sourced from models.dev (snapshot 2026-05-16):
+
+```
+openai:     gpt-5.5, gpt-5.3-codex, gpt-5.3-chat-latest, gpt-5, gpt-5-mini,
+            gpt-5-nano, gpt-4.1, gpt-4.1-mini, gpt-4o, gpt-4o-mini,
+            o1, o1-pro, o3, o3-mini
+anthropic:  claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5
+xai:        grok-4.3, grok-4.20-0309-reasoning, grok-4.20-0309-non-reasoning
+deepseek:   deepseek-reasoner, deepseek-chat
+meta:       llama-4-maverick-17b-128e-instruct-fp8, llama-4-scout-...
+mistral:    mistral-large-2411
+```
+
+Each record carries: `context_window`, `max_output`, `reasoning`, `tool_use`, `modalities_in/out`, `price_in/out_per_1m`, `release` date.
+
+`openmark/models/router.py` maps roles to deployments with `OPENMARK_MODEL_<ROLE>` overrides taking precedence over legacy `AZURE_DEPLOYMENT_*` keys.
+
+`openmark/agent/llms.py` builds the right `AzureChatOpenAI` wrapper per deployment:
+
+- Reasoning OpenAI models (gpt-5*, codex, o-series) → Responses API with top-level `reasoning={"effort":..., "summary":"detailed"}` and `verbosity`.
+- Grok deployments → Chat Completions with top-level `reasoning_effort` and the Foundry `model=deployment` body quirk.
+- Plain chat models (gpt-4.x, mistral, llama) → vanilla `AzureChatOpenAI`.
 
 ---
 
 ## Gradio UI
 
-Three tabs:
+7 tabs:
 
 | Tab | What it does |
-|-----|-------------|
-| Chat | Full LangGraph agent conversation. Remembers context within session. |
-| Search | Direct ChromaDB search with category filter, min score slider, result count. |
-| Stats | Neo4j category breakdown + top tags. Loads on startup. |
+|---|---|
+| Search | Direct semantic search on Neo4j vector index. Cards with similarity bar, category color, tags, source icon. |
+| Chat | Full orchestrator conversation. Live cards stream every sub-agent + tool call. Per-turn thinking bubbles. SQLite history dropdown. Slash command picker. |
+| Stats | Knowledge graph totals, by-category breakdown, top tags. |
+| Graph 3D | Force-directed 3D graph (Search mode + Explore mode). |
+| + Add | Drop URLs or upload Edge/Chrome HTML / JSON / TXT — parsed, deduped, embedded, indexed. |
+| Agent Tools | Live registry of every tool the orchestrator and researcher can call. |
+| Agent Skills | Live registry of SKILL.md recipes (openmark-* / humanizer-* / agent-generated-*). |
 
-Run: `python openmark/ui/app.py` → `http://localhost:7860`
+Run: `python -m openmark.ui.app` → `http://127.0.0.1:7860`
 
 ---
 
-## Data Flow Summary
+## Data flow
 
 ```
-Source files (JSON, HTML)
+Source files (Raindrop JSON, Edge HTML, LinkedIn JSON, YouTube JSON)
         │
    merge.py → normalize.py
         │
-   8,007 items with doc_text
+   ~13k items with doc_text + tags + category + source
         │
-   EmbeddingProvider.embed_documents()
+   EmbeddingProvider.embed_documents() (pplx-embed-context, 1024 dim)
         │
-   ┌────┴────┐
-   │         │
-ChromaDB   Neo4j
-add()      MERGE nodes + relationships
-           CO_OCCURS_WITH edges
-           SIMILAR_TO edges (from ChromaDB top-5 per item)
+   Neo4j MERGE (nodes + IN_CATEGORY + TAGGED + FROM_SOURCE + FROM_DOMAIN)
+        │
+   CO_OCCURS_WITH edges (tag pairs co-saved on same bookmark)
+        │
+   SIMILAR_TO edges (top-5 cosine neighbors per bookmark; skip with --skip-similar)
+        │
+   Optional: Louvain community detection (GDS plugin) → IN_COMMUNITY edges
 ```
+
+---
+
+## Tests
+
+```
+tests/
+├── agent/
+│   ├── test_subagent_registry.py        unit
+│   ├── test_classification.py            unit
+│   ├── test_llms_factory.py              unit
+│   └── test_live_foundry.py              live (gated on OPENMARK_RUN_LIVE_E2E=1)
+├── composer/
+│   ├── test_schemas.py                   unit (pure pydantic)
+│   ├── test_export.py                    unit (pure renderers)
+│   ├── test_verifier_scoring.py          unit
+│   └── test_write_skill.py               unit
+└── middleware/
+    └── test_summarization_wiring.py      unit (introspects compiled graph)
+```
+
+99 unit tests + 7 live Foundry tests. Live tests cover every sub-agent: classifier, researcher, all 5 composer paths, verifier, polisher, humanizer.

@@ -4,9 +4,9 @@
 
 # OpenMark
 
-**Your personal knowledge graph — built from everything you've ever saved.**
+**Personal knowledge graph + multi-agent orchestrator for everything you've ever saved.**
 
-OpenMark ingests your bookmarks, LinkedIn saved posts, and YouTube videos into a dual-store knowledge system: **ChromaDB** for semantic vector search and **Neo4j** for graph-based connection discovery. A LangGraph agent sits on top, letting you query everything in natural language.
+OpenMark ingests bookmarks, LinkedIn saved posts, and YouTube videos into a Neo4j Graph RAG store with semantic embeddings, then puts a v3 LangChain orchestrator on top that delegates to 10 specialist sub-agents (researcher, 5 composers, humanizer, polisher, verifier, skill-author).
 
 Built by [Ahmad Othman Ammar Adi](https://github.com/OthmanAdi).
 
@@ -14,178 +14,137 @@ Built by [Ahmad Othman Ammar Adi](https://github.com/OthmanAdi).
 
 ## What it does
 
-- Pulls all your saved content from multiple sources into one place
-- Embeds everything using [pplx-embed](https://huggingface.co/collections/perplexity-ai/pplx-embed) (local, free) or Azure AI Foundry (fast, cheap)
-- Stores vectors in **ChromaDB** — find things by *meaning*, not keywords
-- Builds a **Neo4j knowledge graph** — discover how topics connect
-- Runs a **LangGraph agent** (powered by gpt-4o-mini) that searches both stores intelligently
-- Serves a **Gradio UI** with Chat, Search, and Stats tabs
-- Also works as a **CLI** — `python scripts/search.py "RAG tools"`
+- Pulls saved content from Raindrop, Edge / Chrome bookmarks, LinkedIn saved posts, YouTube playlists / liked / watch-later
+- Embeds with [pplx-embed](https://huggingface.co/collections/perplexity-ai/pplx-embed) (1024 dim, local, free) or Azure embedding deployments
+- Stores everything in **Neo4j** with vector index + tag co-occurrence edges + SIMILAR_TO neighbors + Louvain communities
+- Runs a single LangChain v1 orchestrator on Azure AI Foundry frontier models (gpt-5.5, gpt-5.3-codex, grok-4.3, claude-opus-4-7, deepseek-reasoner, ...)
+- Delegates work to 10 task_* sub-agents via pure LangChain middleware (`SubAgent`-style, no deepagents):
+  - `task_researcher` — 21 retrieval + web tools
+  - `task_compose_linkedin / essay / roundup / comparison / analytical` — schema-strict Pydantic outputs
+  - `task_humanize` (ar-msa / ar-egt / ar-shami / he) and `task_polish` (English) — voice scrubbers
+  - `task_verify` — 4-check VerificationReport with surgical fix_instructions
+  - `task_author_skill` — sandboxed runtime skill author
+- Serves a Gradio UI with Search, Chat, Stats, Graph 3D, Add, Agent Tools, Agent Skills tabs
+- CLI: `python scripts/search.py "RAG tools"`
 
 ---
 
-## Data Sources
-
-### 1. Raindrop.io
-
-Create a test token at [app.raindrop.io/settings/integrations](https://app.raindrop.io/settings/integrations).
-OpenMark pulls **all collections** automatically via the Raindrop REST API.
-
-### 2. Browser Bookmarks
-
-Export your bookmarks as an HTML file from Edge, Chrome, or Firefox:
-- **Edge:** `Settings → Favourites → ··· → Export favourites` → save as `favorites.html`
-- **Chrome/Firefox:** `Bookmarks Manager → Export`
-
-Point `RAINDROP_MISSION_DIR` in your `.env` to the folder containing the exported HTML files.
-The pipeline parses the Netscape bookmark format automatically.
-
-### 3. LinkedIn Saved Posts
-
-LinkedIn does not provide a public API for saved posts. The included `linkedin_fetch.py` script uses your browser session cookie to call LinkedIn's internal Voyager GraphQL API.
-
-**Steps:**
-1. Log into LinkedIn in your browser
-2. Open DevTools → Application → Cookies → copy the value of `li_at`
-3. Run:
-   ```bash
-   python raindrop-mission/linkedin_fetch.py
-   ```
-   Paste your `li_at` cookie when prompted. The script fetches all saved posts and writes `linkedin_saved.json`.
-
-> **Personal use only.** This uses LinkedIn's internal API which is not publicly documented or officially supported. Use responsibly.
-
-### 4. YouTube
-
-Uses the official [YouTube Data API v3](https://developers.google.com/youtube/v3) via OAuth 2.0.
-
-**Steps:**
-1. Go to [Google Cloud Console](https://console.cloud.google.com/) → Create a project
-2. Enable the **YouTube Data API v3**
-3. Create OAuth 2.0 credentials → Download as `client_secret.json`
-4. Add your Google account as a test user (OAuth consent screen → Test users)
-5. Run:
-   ```bash
-   python raindrop-mission/youtube_fetch.py
-   ```
-   A browser window opens for auth. After that, `youtube_MASTER.json` is written with liked videos, watch later, and playlists.
-
----
-
-## How it works
+## Architecture in one picture
 
 ```
-Your saved content
-        │
-        ▼
-  normalize.py          ← clean titles, dedupe by URL, fix categories
-        │
-        ▼
-  EmbeddingProvider     ← LOCAL: pplx-embed-context-v1-0.6b (documents)
-                                  pplx-embed-v1-0.6b (queries)
-                           AZURE: text-embedding-ada-002
-        │
-        ├──────────────────────────────────┐
-        ▼                                  ▼
-    ChromaDB                            Neo4j
-  (vector store)                    (knowledge graph)
-  find by meaning                   find by connection
-
-  "show me RAG tools"               "what connects LangGraph
-                                     to my Neo4j saves?"
-        │                                  │
-        └──────────────┬───────────────────┘
-                       ▼
-              LangGraph Agent
-              (gpt-4o-mini)
-                       │
-                       ▼
-                  Gradio UI  /  CLI
+                            Your saved content
+                                   │
+                            pipeline/normalize
+                                   │
+                          pplx-embed (1024 dim)
+                                   │
+                              Neo4j Graph RAG
+                            (vector index + tags
+                             + SIMILAR_TO + Louvain)
+                                   │
+                            ┌──────┴──────┐
+                            │             │
+                       Gradio UI      LangChain v1
+                       (Search /      orchestrator
+                        Chat /        (Foundry: gpt-5.5
+                        Stats / ...)   or grok-4.3)
+                                          │
+                  ┌───────────────────────┼───────────────────────┐
+                  │                       │                       │
+        task_researcher (21)   task_compose_* (5 formats)   task_polish / task_humanize
+                  │                       │                       │
+                  └───────────────────────┴───────────────────────┘
+                                          │
+                                     task_verify
+                                  (VerificationReport,
+                                   retry-loop on fail)
+                                          │
+                                    Final answer
 ```
 
-### Why embeddings?
-
-An embedding is a list of numbers that represents the *meaning* of a piece of text. Two pieces of text with similar meaning will have similar numbers — even if they use completely different words. This is how OpenMark finds "retrieval augmented generation tutorials" when you search "RAG tools."
-
-### Why ChromaDB?
-
-ChromaDB stores those embedding vectors locally on your disk. It's a persistent vector database — no server, no cloud, no API key. When you search, it compares your query's embedding against all stored embeddings and returns the closest matches.
-
-### Why Neo4j?
-
-Embeddings answer "what's similar?" — Neo4j answers "how are these connected?" Every bookmark is a node. Tags, categories, domains, and sources are also nodes. Edges connect them. After ingestion, OpenMark also writes `SIMILAR_TO` edges derived from embedding neighbors — so the graph contains semantic connections you never manually created. You can then traverse: *"start from this LangChain article, walk similar-to 2 hops, what clusters emerge?"*
+Every middleware comes from `langchain.agents.middleware`. No deepagents.
 
 ---
 
 ## Requirements
 
-- Python 3.13
-- Neo4j Desktop (local) or AuraDB (cloud) — [neo4j.com/download](https://neo4j.com/download/)
-- **Either** Azure AI Foundry account **or** enough disk space for local pplx-embed (~1.2 GB)
+- Python 3.13+
+- Neo4j (Desktop or AuraDB) with `openmark` database
+- Azure AI Foundry account (recommended for the agent — gpt-5.5 / gpt-5.3-codex / grok-4.3) OR a local OpenAI-compatible server (Ollama / llama.cpp / vLLM) for `AGENT_PROVIDER=local`
+- ~1.2 GB free disk for local pplx-embed (one-time download)
 
 ---
 
 ## Setup
 
-### 1. Clone and install
-
 ```bash
 git clone https://github.com/OthmanAdi/OpenMark.git
 cd OpenMark
 pip install -r requirements.txt
-```
-
-### 2. Configure
-
-```bash
 cp .env.example .env
+# edit .env (see below)
 ```
 
-Edit `.env` with your values:
+Minimum `.env`:
 
 ```env
-# Choose your embedding provider
-EMBEDDING_PROVIDER=local        # or: azure
+# Embedding (local pplx, recommended)
+EMBEDDING_PROVIDER=pplx
+PPLX_QUERY_MODEL=perplexity-ai/pplx-embed-v1-0.6b
+PPLX_DOC_MODEL=perplexity-ai/pplx-embed-context-v1-0.6b
 
-# Azure AI Foundry (required if EMBEDDING_PROVIDER=azure, also used for the LLM agent)
-AZURE_ENDPOINT=https://your-resource.cognitiveservices.azure.com/
-AZURE_API_KEY=your-key
-AZURE_DEPLOYMENT_LLM=gpt-4o-mini
-AZURE_DEPLOYMENT_EMBED=text-embedding-ada-002
+# Azure AI Foundry (the LLM stack)
+AZURE_ENDPOINT=https://<your-resource>.openai.azure.com/
+AZURE_API_KEY=<key>
+AZURE_API_VERSION=2025-04-01-preview
+
+# v3 role -> Foundry deployment overrides (optional; sensible defaults shipped)
+OPENMARK_MODEL_ORCHESTRATOR=gpt-5.5
+OPENMARK_MODEL_CLASSIFIER=gpt-4.1-mini
+OPENMARK_MODEL_SUMMARIZER=gpt-4.1-mini
+OPENMARK_MODEL_RESEARCHER=gpt-5.3-codex
+OPENMARK_MODEL_COMPOSER=gpt-5.5
+OPENMARK_MODEL_HUMANIZER=gpt-5
+OPENMARK_MODEL_POLISHER=gpt-4.1-mini
+OPENMARK_MODEL_VERIFIER=gpt-5-mini
+OPENMARK_MODEL_SKILL_AUTHOR=gpt-4.1-mini
+
+# Legacy back-compat keys still honored:
+AZURE_DEPLOYMENT_EXECUTOR=grok-4.3        # -> orchestrator + researcher
+AZURE_DEPLOYMENT_CLASSIFIER=gpt-4.1-mini  # -> summarizer + classifier + polisher + skill_author
+AZURE_DEPLOYMENT_SYNTHESIZER=gpt-5.3-codex # -> composer + humanizer
+AZURE_DEPLOYMENT_PLANNER=gpt-5.3-codex     # -> verifier
 
 # Neo4j
 NEO4J_URI=bolt://127.0.0.1:7687
 NEO4J_USER=neo4j
-NEO4J_PASSWORD=your-password
-NEO4J_DATABASE=neo4j
+NEO4J_PASSWORD=<password>
+NEO4J_DATABASE=openmark
 
-# Raindrop (get token at app.raindrop.io/settings/integrations)
-RAINDROP_TOKEN=your-token
-
-# Path to your raindrop-mission data folder
-RAINDROP_MISSION_DIR=C:\path\to\raindrop-mission
+# Optional web research
+TAVILY_API_KEY=<key>          # unlocks web_search / web_fetch / web_extract / web_crawl
+BRAVE_API_KEY=<key>           # web_search fallback
+GITHUB_TOKEN=<token>          # raises GitHub API rate limit
 ```
 
-### 3. Ingest
+### Ingest
 
 ```bash
-# Local embeddings (free, ~20 min for 8K items on CPU)
+# Full pipeline (Neo4j only — ChromaDB was removed in v3)
 python scripts/ingest.py
 
-# Azure embeddings (fast, ~5 min, costs ~€0.30 for 8K items)
-python scripts/ingest.py --provider azure
-
-# Also pull fresh from Raindrop API during ingest
-python scripts/ingest.py --fresh-raindrop
-
-# Skip SIMILAR_TO edge computation (saves 25-40 min, Neo4j still required)
+# Fast: skip SIMILAR_TO edges (saves 25-40 min)
 python scripts/ingest.py --skip-similar
-
-# ChromaDB only — skip Neo4j entirely (Neo4j not required)
-python scripts/ingest.py --skip-neo4j
 ```
 
-### 4. Search (CLI)
+### Launch UI
+
+```bash
+python -m openmark.ui.app
+# open http://127.0.0.1:7860
+```
+
+### CLI search
 
 ```bash
 python scripts/search.py "RAG tools"
@@ -194,70 +153,145 @@ python scripts/search.py --tag "rag"
 python scripts/search.py --stats
 ```
 
-### 5. Launch UI
+---
+
+## The agent (v3)
+
+One `create_agent` graph, 14 middleware, 11 tools (10 task_* delegators + write_skill).
+
+| Middleware (in order) | Source | What it does |
+|---|---|---|
+| `classify_intent` (`@before_model`) | `openmark.agent.classification` | Slash → regex → fast LLM. Writes `state.intent` once per thread. |
+| `dynamic_orchestrator_prompt` (`@dynamic_prompt`) | `openmark.agent.classification` | Reads `state.intent`, injects matching system prompt with live KB stats. |
+| `ContextEditingMiddleware(ClearToolUsesEdit)` | langchain | Trims old tool outputs at 120k tokens, keeps last 4. |
+| `SummarizationMiddleware` | langchain | Triggers at 100k tokens or 80 messages, keeps last 24. Uses cheap summarizer model. |
+| `TodoListMiddleware` | langchain | Adds `write_todos` so the agent plans before fanning out. |
+| `ModelCallLimitMiddleware` | langchain | Hard cap 30 model calls per turn. |
+| `ToolCallLimitMiddleware` | langchain | Global 40 + per-tool caps on expensive composers. |
+| `ModelRetryMiddleware` | langchain | 3 retries, exponential backoff. |
+| `slash_skill_loader` (`@before_model`) | `openmark.agent.middleware` | `/<skill>` pre-loads matching SKILL.md and strips the slash from the message. |
+| `OpenMarkSkillMiddleware` | `openmark.agent.middleware` | Skill catalogue + `load_skill` tool. |
+| `ToolRetryMiddleware` | langchain | 2 retries on flaky sub-agent calls. |
+| `tool_event_middleware` (`@wrap_tool_call`) | `openmark.agent.middleware` | Captures every tool start / end / error for UI cards. |
+
+Checkpointer: `SqliteSaver` at `data/openmark_agent.db` — threads survive restart.
+
+### Sub-agents
+
+Each is a compiled `create_agent` graph exposed to the orchestrator as a `@tool`. They live in `openmark/agent/subagents/`. Composer + verifier sub-agents use `response_format=ToolStrategy(<Schema>)` so the orchestrator receives validated Pydantic structured outputs.
+
+| Sub-agent | Tools | Response schema | Triggered by |
+|---|---|---|---|
+| `task_researcher` | 21 (15 graph + 6 web) | — | every retrieval path |
+| `task_compose_linkedin` | 0 | `LinkedInPost` | `/newsletter-thread`, "LinkedIn post on X" |
+| `task_compose_essay` | 0 | `NewsletterEssay` | `/newsletter-essay` |
+| `task_compose_roundup` | 0 | `NewsletterRoundup` | `/newsletter-roundup` |
+| `task_compose_comparison` | 0 | `NewsletterComparison` | `/newsletter-comparison` |
+| `task_compose_analytical` | 0 | `NewsletterAnalytical` | `/newsletter on X` (default) |
+| `task_humanize` | 0 | — | language is `ar-msa`, `ar-egt`, `ar-shami`, or `he` |
+| `task_polish` | 0 | — | language is `en` |
+| `task_verify` | 0 | `VerificationReport` | post-compose retry-loop guard |
+| `task_author_skill` | `write_skill` | — | "bake this prompt into a reusable skill" |
+
+---
+
+## Slash commands (Chat tab)
+
+```
+/fast-search <query>            quick one-shot lookup
+/deep-research <topic>          multi-angle research with synthesis
+/newsletter <topic>             analytical newsletter (default shape)
+/newsletter-essay <topic>       long-form thesis essay, 600-900 words
+/newsletter-roundup <window>    categorical news roundup (3-6 buckets)
+/newsletter-comparison <A vs B> side-by-side comparison + table + picks
+/newsletter-thread <topic>      LinkedIn / short-form post (250-400 words)
+/weekly-digest                  last-7-days recap, grouped by category
+/bookmark-dive <URL>            single URL + graph_expand neighbors
+/repo-research <owner/repo>     GitHub repo intel + related saves
+/niche-hunter <theme>           find under-discussed corners of the KB
+```
+
+Plain English also works — the intent classifier middleware routes everything that isn't a slash.
+
+---
+
+## Foundry model bank
+
+`openmark/models/foundry.py` ships a typed registry of 25 frontier deployments sourced from [models.dev](https://models.dev) and cross-verified against provider announcements (gpt-5.5 1M ctx, claude-opus-4-7 1M ctx, grok-4.3 1M ctx, deepseek-reasoner 1M ctx, etc). Helpers:
+
+```python
+from openmark.models import get, context_window, supports_reasoning, role_model_id
+
+get("gpt-5.5").context_window         # -> 1_050_000
+supports_reasoning("grok-4.3")        # -> True
+role_model_id("orchestrator")         # -> resolves from .env or ROLE_DEFAULTS
+```
+
+`openmark/models/router.py` maps roles to deployments with `OPENMARK_MODEL_<ROLE>` overrides taking precedence over legacy `AZURE_DEPLOYMENT_*` keys.
+
+---
+
+## Tests
 
 ```bash
-python openmark/ui/app.py
-```
+# Pure-unit tests (no LLM, no Neo4j)
+pytest tests/ -q
+# -> 99 passed, 7 skipped
 
-Open [http://localhost:7860](http://localhost:7860)
-
----
-
-## Required API Keys
-
-| Key | Where to get it | Required? |
-|-----|----------------|-----------|
-| `RAINDROP_TOKEN` | [app.raindrop.io/settings/integrations](https://app.raindrop.io/settings/integrations) | Yes |
-| `AZURE_API_KEY` | Azure Portal → your AI Foundry resource | Only if `EMBEDDING_PROVIDER=azure` |
-| `NEO4J_PASSWORD` | Set when creating your Neo4j database | Yes |
-| YouTube OAuth | Google Cloud Console → YouTube Data API v3 | Only if ingesting YouTube |
-
-No HuggingFace token is needed for local pplx-embed. The models are open weights and download automatically. You will see a warning `"You are sending unauthenticated requests to the HF Hub"` — this is harmless and can be silenced by setting `HF_TOKEN` in your `.env` if you want higher rate limits.
-
----
-
-## Project Structure
-
-```
-OpenMark/
-├── openmark/
-│   ├── config.py              ← all settings loaded from .env
-│   ├── pipeline/
-│   │   ├── raindrop.py        ← pull all Raindrop collections via API
-│   │   ├── normalize.py       ← clean, dedupe, build embedding text
-│   │   └── merge.py           ← combine all sources
-│   ├── embeddings/
-│   │   ├── base.py            ← abstract EmbeddingProvider interface
-│   │   ├── local.py           ← pplx-embed (local, free)
-│   │   ├── azure.py           ← Azure AI Foundry
-│   │   └── factory.py         ← returns provider based on .env
-│   ├── stores/
-│   │   ├── chroma.py          ← ChromaDB: ingest + semantic search
-│   │   └── neo4j_store.py     ← Neo4j: graph nodes, edges, traversal
-│   ├── agent/
-│   │   ├── tools.py           ← LangGraph tools (search, tag, graph)
-│   │   └── graph.py           ← create_react_agent with gpt-4o-mini
-│   └── ui/
-│       └── app.py             ← Gradio UI (Chat / Search / Stats)
-└── scripts/
-    ├── ingest.py              ← full pipeline runner
-    └── search.py              ← CLI search
+# Live Foundry e2e (real API calls, ~18 min total)
+OPENMARK_RUN_LIVE_E2E=1 pytest tests/agent/test_live_foundry.py -v
+# -> 7 passed:
+#    test_classifier_writes_state_intent
+#    test_researcher_returns_anchor_list
+#    test_compose_analytical_full_loop
+#    test_compose_linkedin_emits_structured
+#    test_verifier_runs_on_compose_path
+#    test_polisher_routes_for_english
+#    test_humanizer_routes_for_arabic
 ```
 
 ---
 
-## Roadmap
+## Project layout
 
-- [ ] OpenAI embeddings integration
-- [ ] Ollama local LLM support
-- [ ] Pinecone vector store option
-- [ ] Web scraping — fetch full page content for richer embeddings
-- [ ] Browser extension for real-time saving to OpenMark
-- [ ] Comet / Arc browser bookmark import
-- [ ] Automatic re-ingestion on schedule
-- [ ] Export to Obsidian / Notion
-- [ ] Multi-user support
+```
+openmark/
+├── agent/
+│   ├── classification.py     # @before_model + @dynamic_prompt for intent
+│   ├── graph.py              # build_agent() + ask() + ask_stream()
+│   ├── llms.py               # build_orchestrator / classifier / summarizer / ...
+│   ├── middleware.py         # OpenMarkSkillMiddleware + slash_skill_loader + tool_event_middleware
+│   ├── schemas.py            # Pydantic shapes (LinkedInPost, Newsletter*, VerificationReport)
+│   ├── skills.py             # SKILL.md loader (openmark-* / humanizer-* / agent-generated-*)
+│   ├── tools.py              # 22 @tool functions (graph + web) + write_skill
+│   ├── web.py                # httpx / Tavily / Brave / DDG / GitHub / Reddit transport
+│   └── subagents/
+│       ├── _common.py        # make_subagent_graph, format_for_orchestrator, task_tool decorator
+│       ├── researcher.py
+│       ├── composer_linkedin.py / _essay / _roundup / _comparison / _analytical
+│       ├── humanizer.py
+│       ├── polisher.py
+│       ├── verifier.py
+│       └── skill_author.py
+├── composer/
+│   └── export.py             # pure-stdlib renderers (markdown / LinkedIn plaintext / LinkedIn HTML)
+├── embeddings/               # pplx local + Azure embed provider
+├── models/
+│   ├── foundry.py            # 25-model frontier bank from models.dev
+│   └── router.py             # role -> deployment resolution
+├── pipeline/                 # injector + normalize + raindrop + merge
+├── stores/
+│   └── neo4j_store.py        # Graph RAG storage layer
+├── ui/
+│   └── app.py                # Gradio UI (7 tabs)
+├── config.py                 # .env loading with critical-key scrub
+└── history.py                # SQLite chat history (sessions + messages)
+
+tests/
+├── agent/                    # subagent registry, classification, llms factory, live Foundry
+├── composer/                 # schemas, export
+└── middleware/               # summarization wiring, context-editing wiring
+```
 
 ---
 
@@ -265,10 +299,11 @@ OpenMark/
 
 | Doc | What's in it |
 |-----|-------------|
-| [docs/data-collection.md](docs/data-collection.md) | Full guide for each data source — Raindrop, Edge, LinkedIn cookie method, YouTube OAuth, daily.dev console script |
-| [docs/ingest.md](docs/ingest.md) | All ingest flags, timing for each step, how SIMILAR_TO edges work, re-run behavior |
-| [docs/architecture.md](docs/architecture.md) | Dual-store design, Neo4j graph schema, embedding patches, Cypher query examples, agent tools |
-| [docs/troubleshooting.md](docs/troubleshooting.md) | pplx-embed compatibility fixes, LinkedIn queryId changes, Neo4j connection issues, Windows encoding |
+| [docs/architecture.md](docs/architecture.md) | Neo4j Graph RAG schema, agent middleware stack, sub-agent contracts |
+| [docs/data-collection.md](docs/data-collection.md) | Per-source ingest guide (Raindrop, Edge, LinkedIn cookie, YouTube OAuth) |
+| [docs/ingest.md](docs/ingest.md) | Ingest CLI flags, SIMILAR_TO edge math, re-run behavior |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | pplx-embed patches, LinkedIn queryId changes, Neo4j connection, Foundry quirks |
+| [docs/huggingface.md](docs/huggingface.md) | Local pplx-embed model loading + cache management |
 
 ---
 

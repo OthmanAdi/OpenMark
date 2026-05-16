@@ -53,12 +53,12 @@ api.upload_folder(
     folder_path='.',
     repo_id='OthmanAdi/OpenMark',
     repo_type='space',
-    ignore_patterns=['.env', 'data/chroma_db/*', '__pycache__/*', '.git/*'],
+    ignore_patterns=['.env', 'data/*.db*', '__pycache__/*', '.git/*'],
 )
 "
 ```
 
-> **Note:** The Space version requires your ChromaDB and Neo4j data to be pre-loaded. For a public demo, you would host a sample dataset. For private use, the full local setup is better.
+> **Note:** The Space version requires your Neo4j data to be pre-loaded. For a public demo, you would host a sample dataset. For private use, the full local setup is better.
 
 ---
 
