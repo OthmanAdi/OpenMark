@@ -1,0 +1,23 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import IssueCard from '../../components/IssueCard.astro';
+import { getCollection } from 'astro:content';
+
+const all = await getCollection('newsletters', ({ data }) => !data.draft);
+const issues = all.sort(
+  (a, b) => b.data.published_at.getTime() - a.data.published_at.getTime()
+);
+---
+<BaseLayout title="All issues — OpenMark" description="Complete archive of OpenMark newsletter issues.">
+  <h1 class="text-3xl font-bold text-ink mb-2">All issues</h1>
+  <p class="text-muted mb-6">{issues.length} issue{issues.length === 1 ? '' : 's'} published</p>
+  {issues.map((issue) => (
+    <IssueCard
+      slug={issue.slug}
+      title={issue.data.title}
+      subtitle={issue.data.subtitle}
+      kicker={issue.data.kicker}
+      published_at={issue.data.published_at}
+    />
+  ))}
+</BaseLayout>

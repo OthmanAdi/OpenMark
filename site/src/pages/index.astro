@@ -1,0 +1,48 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import IssueCard from '../components/IssueCard.astro';
+import SubscribeForm from '../components/SubscribeForm.astro';
+import { getCollection } from 'astro:content';
+
+const all = await getCollection('newsletters', ({ data }) => !data.draft);
+const issues = all
+  .sort((a, b) => b.data.published_at.getTime() - a.data.published_at.getTime())
+  .slice(0, 12);
+---
+<BaseLayout
+  title="OpenMark"
+  description="Curated weekly newsletter from Ahmad Adi's bookmark knowledge graph — built on agents, RAG, and the modern engineering stack."
+>
+  <section class="pb-10 border-b border-rule">
+    <p class="text-xs uppercase tracking-widest text-muted">Newsletter</p>
+    <h1 class="mt-2 text-4xl sm:text-5xl font-bold text-ink leading-tight">
+      Signal from a curated knowledge graph.
+    </h1>
+    <p class="mt-4 text-lg text-muted leading-relaxed">
+      Weekly drops on AI agents, retrieval, knowledge graphs, and the moving frontier
+      of what builders actually use. Sourced from 13,000+ saves; cited every time.
+    </p>
+    <div class="mt-6">
+      <SubscribeForm />
+    </div>
+  </section>
+
+  <section class="pt-10">
+    <h2 class="text-sm font-semibold uppercase tracking-widest text-muted mb-2">Recent issues</h2>
+    {issues.length === 0 && (
+      <p class="text-muted py-6">First issue ships soon.</p>
+    )}
+    {issues.map((issue) => (
+      <IssueCard
+        slug={issue.slug}
+        title={issue.data.title}
+        subtitle={issue.data.subtitle}
+        kicker={issue.data.kicker}
+        published_at={issue.data.published_at}
+      />
+    ))}
+    {issues.length > 0 && (
+      <a href="/issues/" class="inline-block mt-6 text-accent hover:underline">View all issues →</a>
+    )}
+  </section>
+</BaseLayout>

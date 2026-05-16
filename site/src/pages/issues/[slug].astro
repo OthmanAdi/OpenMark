@@ -1,0 +1,31 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { getCollection, render } from 'astro:content';
+
+export async function getStaticPaths() {
+  const issues = await getCollection('newsletters', ({ data }) => !data.draft);
+  return issues.map((issue) => ({
+    params: { slug: issue.slug },
+    props: { issue },
+  }));
+}
+
+const { issue } = Astro.props;
+const { Content } = await render(issue);
+const { title, subtitle, kicker, published_at } = issue.data;
+const dateStr = published_at.toISOString().slice(0, 10);
+---
+<BaseLayout title={title} description={subtitle || `${title} — OpenMark issue ${dateStr}`}>
+  <article class="prose prose-lg max-w-none">
+    <div class="not-prose mb-6">
+      <div class="flex items-baseline gap-3 text-xs uppercase tracking-widest text-muted">
+        <time datetime={published_at.toISOString()}>{dateStr}</time>
+        {kicker && <span class="text-muted">·</span>}
+        {kicker && <span>{kicker}</span>}
+      </div>
+      <h1 class="mt-2 text-4xl font-bold text-ink leading-tight">{title}</h1>
+      {subtitle && <p class="mt-3 text-lg text-muted leading-relaxed">{subtitle}</p>}
+    </div>
+    <Content />
+  </article>
+</BaseLayout>

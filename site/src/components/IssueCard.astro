@@ -1,0 +1,23 @@
+---
+interface Props {
+  slug: string;
+  title: string;
+  subtitle?: string;
+  kicker?: string;
+  published_at: Date;
+}
+
+const { slug, title, subtitle, kicker, published_at } = Astro.props;
+const dateStr = published_at.toISOString().slice(0, 10);
+---
+<article class="group py-6 border-b border-rule last:border-b-0">
+  <a href={`/issues/${slug}/`} class="block no-underline">
+    <div class="flex items-baseline gap-3 text-xs text-muted uppercase tracking-widest">
+      <time datetime={published_at.toISOString()}>{dateStr}</time>
+      {kicker && <span class="text-muted">·</span>}
+      {kicker && <span>{kicker}</span>}
+    </div>
+    <h2 class="mt-2 text-2xl font-semibold text-ink group-hover:text-accent transition-colors">{title}</h2>
+    {subtitle && <p class="mt-2 text-base text-muted leading-relaxed">{subtitle}</p>}
+  </a>
+</article>

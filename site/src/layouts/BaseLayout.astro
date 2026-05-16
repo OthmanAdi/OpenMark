@@ -1,0 +1,69 @@
+---
+import '../styles/global.css';
+
+interface Props {
+  title: string;
+  description?: string;
+  canonical?: string;
+  ogImage?: string;
+}
+
+const { title, description, canonical, ogImage } = Astro.props;
+const siteName = 'OpenMark';
+const fullTitle = title === siteName ? siteName : `${title} — ${siteName}`;
+const ogImageUrl = ogImage || new URL('/og-default.png', Astro.site).toString();
+const canonicalUrl = canonical || Astro.url.toString();
+---
+<!DOCTYPE html>
+<html lang="en" class="bg-bg text-ink">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{fullTitle}</title>
+  {description && <meta name="description" content={description} />}
+  <link rel="canonical" href={canonicalUrl} />
+
+  <meta property="og:title" content={fullTitle} />
+  {description && <meta property="og:description" content={description} />}
+  <meta property="og:type" content="article" />
+  <meta property="og:url" content={canonicalUrl} />
+  <meta property="og:image" content={ogImageUrl} />
+  <meta property="og:site_name" content={siteName} />
+
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content={fullTitle} />
+  {description && <meta name="twitter:description" content={description} />}
+  <meta name="twitter:image" content={ogImageUrl} />
+
+  <link rel="alternate" type="application/rss+xml" title="OpenMark Newsletter" href="/rss.xml" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+</head>
+<body class="min-h-screen flex flex-col">
+  <header class="border-b border-rule">
+    <div class="max-w-3xl mx-auto px-4 py-6 flex items-center justify-between">
+      <a href="/" class="text-xl font-bold text-ink no-underline">OpenMark</a>
+      <nav class="flex gap-6 text-sm text-muted">
+        <a href="/" class="hover:text-ink">Issues</a>
+        <a href="/subscribe/" class="hover:text-ink">Subscribe</a>
+        <a href="/rss.xml" class="hover:text-ink">RSS</a>
+        <a href="https://github.com/OthmanAdi/OpenMark" class="hover:text-ink">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="flex-1 max-w-3xl w-full mx-auto px-4 py-10">
+    <slot />
+  </main>
+
+  <footer class="border-t border-rule">
+    <div class="max-w-3xl mx-auto px-4 py-8 text-sm text-muted flex flex-wrap justify-between gap-4">
+      <span>© {new Date().getFullYear()} OpenMark · curated by <a href="https://github.com/OthmanAdi" class="text-accent">Ahmad Adi</a></span>
+      <span>
+        <a href="/llms.txt" class="hover:text-ink">llms.txt</a>
+        &nbsp;·&nbsp;
+        <a href="/rss.xml" class="hover:text-ink">RSS</a>
+      </span>
+    </div>
+  </footer>
+</body>
+</html>

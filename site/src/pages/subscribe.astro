@@ -1,0 +1,20 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import SubscribeForm from '../components/SubscribeForm.astro';
+---
+<BaseLayout title="Subscribe to OpenMark" description="Weekly drops from a curated knowledge graph.">
+  <h1 class="text-3xl font-bold text-ink mb-2">Subscribe</h1>
+  <p class="text-muted mb-6">
+    One email a week. Sometimes two. Signal only.
+  </p>
+  <SubscribeForm />
+  <div class="mt-12 pt-6 border-t border-rule text-sm text-muted">
+    <p class="mb-2"><strong class="text-ink">How it works:</strong></p>
+    <ol class="list-decimal pl-5 space-y-1">
+      <li>You submit your email above.</li>
+      <li>We send a confirm-link email (double opt-in — required to be GDPR-clean).</li>
+      <li>You click the link. You're in.</li>
+      <li>Every issue has a one-click unsubscribe footer. No friction.</li>
+    </ol>
+  </div>
+</BaseLayout>

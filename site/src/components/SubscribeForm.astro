@@ -1,0 +1,32 @@
+---
+// Subscribe form. Posts to the configured PUBLISH_API_URL endpoint, which is
+// either a Cloudflare Worker or the local Python endpoint exposed via tunnel.
+// In static-export mode we don't run server code here — the form does a
+// vanilla POST and the endpoint returns a redirect or JSON.
+
+const API_URL = import.meta.env.PUBLIC_PUBLISH_API_URL || '/api/subscribe';
+---
+<form
+  method="POST"
+  action={API_URL}
+  class="flex flex-col sm:flex-row gap-3 max-w-md"
+>
+  <input
+    type="email"
+    name="email"
+    required
+    autocomplete="email"
+    placeholder="you@somewhere.dev"
+    class="flex-1 px-4 py-2 rounded-md border border-rule focus:border-accent focus:outline-none text-base"
+  />
+  <input type="hidden" name="source" value="site" />
+  <button
+    type="submit"
+    class="px-5 py-2 rounded-md bg-ink text-white font-medium hover:bg-accent transition-colors"
+  >
+    Subscribe
+  </button>
+</form>
+<p class="mt-2 text-xs text-muted">
+  Double opt-in. We email a confirm link, you click it, we add you. Unsubscribe in every issue.
+</p>

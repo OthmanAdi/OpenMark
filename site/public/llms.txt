@@ -1,0 +1,22 @@
+# OpenMark
+
+> Personal newsletter and knowledge graph from Ahmad Adi. Weekly issues on AI agents, retrieval-augmented generation, knowledge graphs, and the modern engineering stack. Sourced from a curated archive of ~13,000 bookmarks.
+
+OpenMark publishes weekly newsletter issues plus daily LinkedIn posts. Issues are written from a Neo4j Graph RAG store with 1024-dim pplx-embed vectors; every claim cites a real URL.
+
+## Content
+
+- [Issues archive](/issues/): Complete list of all newsletter issues
+- [RSS feed](/rss.xml): Subscribe via your reader
+- [Subscribe by email](/subscribe/): Weekly email digest
+
+## Topics covered
+
+- AI agent architectures (LangChain v1, sub-agent patterns, middleware stacks)
+- Retrieval-augmented generation (vector + graph hybrid, embedding choices)
+- Knowledge graphs (Neo4j, Cypher, Louvain communities, SIMILAR_TO edges)
+- The modern engineering stack (Foundry-routed LLMs, MCP, structured tool use)
+
+## Source code
+
+- [OpenMark repository](https://github.com/OthmanAdi/OpenMark): The orchestrator, sub-agents, and publish pipeline that produces this newsletter
