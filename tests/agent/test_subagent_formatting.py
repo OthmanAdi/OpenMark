@@ -46,6 +46,33 @@ def test_compact_tool_messages_keeps_last_k():
     assert [p[0] for p in pairs] == ["tool_7", "tool_8", "tool_9"]
 
 
+def test_compact_tool_messages_always_keeps_graph_expand():
+    """graph_expand / get_bookmark_full / run_cypher carry unique graph data
+    that no other tool surfaces. They MUST appear in the output regardless
+    of how many low-value tools fired after."""
+    msgs = [
+        ToolMessage(content="graph data 1", tool_call_id="1", name="graph_expand"),
+        ToolMessage(content="full bookmark", tool_call_id="2", name="get_bookmark_full"),
+        ToolMessage(content="cypher rows",   tool_call_id="3", name="run_cypher"),
+        # Lots of search_* results after — would push the above out of last-6
+        ToolMessage(content="search r4", tool_call_id="4", name="search_semantic"),
+        ToolMessage(content="search r5", tool_call_id="5", name="search_semantic"),
+        ToolMessage(content="search r6", tool_call_id="6", name="search_semantic"),
+        ToolMessage(content="search r7", tool_call_id="7", name="search_semantic"),
+        ToolMessage(content="search r8", tool_call_id="8", name="search_semantic"),
+        ToolMessage(content="search r9", tool_call_id="9", name="search_semantic"),
+        ToolMessage(content="search r10", tool_call_id="10", name="search_semantic"),
+    ]
+    pairs = _compact_tool_messages(msgs, keep=3, per_msg_cap=200)
+    names = [p[0] for p in pairs]
+    # All three high-value tools survive
+    assert "graph_expand" in names
+    assert "get_bookmark_full" in names
+    assert "run_cypher" in names
+    # Plus the last 3 search_* results
+    assert names.count("search_semantic") == 3
+
+
 def test_compact_tool_messages_caps_long_content():
     long_content = "x" * 5000
     msgs = [ToolMessage(content=long_content, tool_call_id="1", name="search")]

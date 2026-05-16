@@ -144,12 +144,31 @@ def _looks_like_refusal(text: str) -> bool:
     return any(m in low for m in _REFUSAL_MARKERS)
 
 
+# Tools whose results carry unique, irreplaceable graph context — we ALWAYS
+# include their results in the orchestrator-visible blob, even if other tools
+# fired more recently. graph_expand returns SIMILAR_TO + community peer URLs
+# that no other tool surfaces; get_bookmark_full returns the full neighborhood
+# of one bookmark; run_cypher returns whatever the agent designed (often
+# unique). Keep their data prominent so the orchestrator can build on it.
+_HIGH_VALUE_TOOLS = {
+    "graph_expand",
+    "get_bookmark_full",
+    "run_cypher",
+}
+
+
 def _compact_tool_messages(
     messages: list, *, keep: int = 6, per_msg_cap: int = 1200,
 ) -> list[tuple[str, str]]:
-    """Return the last `keep` ToolMessages as (tool_name, compacted_content)."""
-    out: list[tuple[str, str]] = []
-    for m in messages:
+    """
+    Return up to `keep` ToolMessages plus EVERY high-value-tool result.
+
+    Order preserved as encountered in the message stream. A graph_expand /
+    get_bookmark_full / run_cypher result is always kept; other tools are
+    kept on a last-N basis.
+    """
+    all_pairs: list[tuple[int, str, str]] = []
+    for idx, m in enumerate(messages):
         if isinstance(m, ToolMessage) or getattr(m, "type", "") == "tool":
             name = getattr(m, "name", None) or "?"
             content = getattr(m, "content", "") or ""
@@ -157,8 +176,18 @@ def _compact_tool_messages(
                 content = str(content)
             if len(content) > per_msg_cap:
                 content = content[:per_msg_cap].rstrip() + f"\n…(+{len(content) - per_msg_cap} chars)"
-            out.append((name, content))
-    return out[-keep:]
+            all_pairs.append((idx, name, content))
+
+    # Step 1: always include every high-value-tool result.
+    hi_indexes = {p[0] for p in all_pairs if p[1] in _HIGH_VALUE_TOOLS}
+    # Step 2: top up with the most recent OTHER tool results until we hit `keep`
+    #         total entries. (high-value ones are not counted against `keep`
+    #         because they're load-bearing.)
+    other = [p for p in all_pairs if p[1] not in _HIGH_VALUE_TOOLS]
+    chosen_other = other[-keep:] if keep > 0 else []
+    chosen_indexes = hi_indexes | {p[0] for p in chosen_other}
+
+    return [(name, content) for idx, name, content in all_pairs if idx in chosen_indexes]
 
 
 def format_for_orchestrator(
