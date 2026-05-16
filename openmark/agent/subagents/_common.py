@@ -37,7 +37,11 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from pydantic import BaseModel
 
 from openmark.agent.llms import build_summarizer
-from openmark.agent.middleware import tool_event_middleware
+from openmark.agent.middleware import (
+    OpenMarkSkillMiddleware,
+    load_skill as _load_skill_tool,
+    tool_event_middleware,
+)
 
 
 def make_subagent_graph(
@@ -52,6 +56,7 @@ def make_subagent_graph(
     context_edit_keep: int = 5,
     run_limit: int = 8,
     extra_middleware: Sequence[AgentMiddleware] | None = None,
+    include_skills: bool = True,
 ):
     """
     Compile a sub-agent graph with our standard middleware stack.
@@ -61,9 +66,18 @@ def make_subagent_graph(
         2. SummarizationMiddleware    (fallback history compaction)
         3. ModelCallLimitMiddleware   (per-turn cap, sub-agents are bounded)
         4. ToolRetryMiddleware        (transient tool flakes)
-        5. tool_event_middleware      (UI event bus — sub-agent tool calls
+        5. OpenMarkSkillMiddleware    (catalogue + load_skill — when
+                                       include_skills=True; default)
+        6. tool_event_middleware      (UI event bus — sub-agent tool calls
                                        appear as cards just like orchestrator tools)
-        6. ...extra_middleware (caller-supplied additions go LAST)
+        7. ...extra_middleware (caller-supplied additions go LAST)
+
+    Skill reachability: with `include_skills=True` (default), every sub-agent
+    gets the `load_skill` tool AND a system-prompt addendum listing every
+    SKILL.md on disk. Drop a new file under .claude/skills/<prefix>-<name>/
+    SKILL.md, restart the app, and the sub-agent's first turn sees it.
+    Sub-agent prompts that hardcode `CALL load_skill('X')` now have a real
+    tool to invoke instead of improvising from training.
     """
     mw: list[AgentMiddleware] = [
         ContextEditingMiddleware(
@@ -76,14 +90,33 @@ def make_subagent_graph(
         ),
         ModelCallLimitMiddleware(run_limit=run_limit, exit_behavior="end"),
         ToolRetryMiddleware(max_retries=2),
-        tool_event_middleware,
     ]
+    # Skill catalogue + load_skill tool — opt-out via include_skills=False.
+    # OpenMarkSkillMiddleware re-scans the skills dir at __init__ time, so
+    # rebuilding the agent after dropping a new SKILL.md is enough; the cache
+    # is cleared via skills.reload_skills() on process restart.
+    if include_skills:
+        mw.append(OpenMarkSkillMiddleware())
+    # Event bus goes LAST so it sees every sub-agent + skill tool call.
+    mw.append(tool_event_middleware)
+
     if extra_middleware:
         mw.extend(extra_middleware)
 
+    # Compose the final tool list:
+    #   - caller-supplied tools (researcher's 21 retrieval tools, skill-author's
+    #     write_skill, composers' empty list)
+    #   - PLUS load_skill so the sub-agent can fetch any SKILL.md body on demand
+    # We add load_skill explicitly here (in addition to OpenMarkSkillMiddleware.tools)
+    # because create_agent merges middleware tools, but bare-tool registration is
+    # the deterministic path — never trust transitive inclusion.
+    merged_tools: list[Any] = list(tools or [])
+    if include_skills and _load_skill_tool not in merged_tools:
+        merged_tools.append(_load_skill_tool)
+
     kwargs: dict[str, Any] = dict(
         model=model,
-        tools=list(tools or []),
+        tools=merged_tools,
         system_prompt=system_prompt,
         middleware=mw,
     )
