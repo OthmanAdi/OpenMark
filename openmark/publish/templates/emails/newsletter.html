@@ -1,0 +1,97 @@
+<x-base>
+
+  {{!-- Hero --}}
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+    <tr>
+      <td class="pb-6">
+        <if condition="data.kicker">
+          <p class="m-0 mb-2 text-xs uppercase tracking-widest text-muted">{{ data.kicker }}</p>
+        </if>
+        <h1 class="m-0 text-3xl leading-tight font-bold text-ink sm-text-2xl">{{ data.title }}</h1>
+        <if condition="data.subtitle">
+          <p class="m-0 mt-3 text-base leading-relaxed text-muted">{{ data.subtitle }}</p>
+        </if>
+      </td>
+    </tr>
+  </table>
+
+  {{!-- Hook / pulse --}}
+  <if condition="data.hook">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+      <tr>
+        <td class="pb-6 border-b border-rule">
+          <p class="m-0 text-base leading-relaxed text-ink sm-text-base">{{ data.hook }}</p>
+        </td>
+      </tr>
+    </table>
+  </if>
+
+  {{!-- Body sections --}}
+  <each loop="section, i in data.sections">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+      <tr>
+        <td class="pt-8 pb-4">
+          <h2 class="m-0 mb-3 text-xl leading-snug font-semibold text-ink">{{ section.heading }}</h2>
+          <div class="text-base leading-relaxed text-ink">{{ section.body_html }}</div>
+        </td>
+      </tr>
+    </table>
+  </each>
+
+  {{!-- What I'm reading --}}
+  <if condition="data.what_im_reading && data.what_im_reading.length > 0">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+      <tr>
+        <td class="pt-8 pb-2 border-t border-rule">
+          <h2 class="m-0 mb-4 text-xl leading-snug font-semibold text-ink">What I'm reading</h2>
+        </td>
+      </tr>
+      <each loop="item in data.what_im_reading">
+        <tr>
+          <td class="pb-4">
+            <a href="{{ item.url }}" class="text-base font-semibold text-ink no-underline">{{ item.title }}</a>
+            <p class="m-0 mt-1 text-sm text-muted">{{ item.domain }}</p>
+            <if condition="item.so_what">
+              <p class="m-0 mt-2 text-sm leading-relaxed text-ink">{{ item.so_what }}</p>
+            </if>
+          </td>
+        </tr>
+      </each>
+    </table>
+  </if>
+
+  {{!-- Sources cited --}}
+  <if condition="data.sources && data.sources.length > 0">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+      <tr>
+        <td class="pt-8 pb-2 border-t border-rule">
+          <h3 class="m-0 mb-3 text-sm uppercase tracking-widest text-muted">Sources cited</h3>
+          <ol class="m-0 pl-5 text-sm leading-relaxed text-ink">
+            <each loop="s in data.sources">
+              <li class="mb-2"><a href="{{ s.url }}" class="text-accent no-underline">{{ s.title }}</a><if condition="s.note"> <span class="text-muted">— {{ s.note }}</span></if></li>
+            </each>
+          </ol>
+        </td>
+      </tr>
+    </table>
+  </if>
+
+  {{!-- Footer --}}
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+    <tr>
+      <td class="pt-10 pb-2 border-t border-rule text-center">
+        <p class="m-0 text-xs text-muted">
+          You're getting this because you subscribed to <strong class="text-ink">{{ data.publication_name || 'OpenMark' }}</strong>.
+        </p>
+        <p class="m-0 mt-2 text-xs text-muted">
+          <if condition="data.web_url">
+            <a href="{{ data.web_url }}" class="text-muted no-underline">Read on the web</a>
+            &nbsp;·&nbsp;
+          </if>
+          <a href="{{ data.unsubscribe_url }}" class="text-muted no-underline">Unsubscribe</a>
+        </p>
+      </td>
+    </tr>
+  </table>
+
+</x-base>

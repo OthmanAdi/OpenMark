@@ -134,3 +134,14 @@ research/
 drafts/
 ONBOARDING.md
 *.session.md
+
+# ── Node modules / build artifacts in the Maizzle + Astro toolchains ──────
+node_modules/
+openmark/publish/templates/node_modules/
+openmark/publish/templates/build_local/
+openmark/publish/templates/build_production/
+openmark/publish/templates/data/payload.json
+site/node_modules/
+site/dist/
+site/.astro/
+.pnpm-store/
