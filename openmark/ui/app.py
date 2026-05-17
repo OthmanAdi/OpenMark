@@ -1016,6 +1016,25 @@ def build_ui():
                     render_markdown=True,
                 )
 
+                # Status badge — visible only while a generation is streaming.
+                # Sits between the chatbot and the input row so it's
+                # unmissable. Idle: hidden. Active: animated dot + label.
+                status_badge = gr.HTML(
+                    value=(
+                        "<div style='display:flex;align-items:center;gap:8px;"
+                        "padding:6px 12px;background:#0f172a;border-left:3px solid #6366f1;"
+                        "border-radius:4px;margin:6px 0;color:#cbd5e1;font-size:0.85em'>"
+                        "<span style='display:inline-block;width:10px;height:10px;"
+                        "border-radius:50%;background:#6366f1;animation:omk-pulse 1s ease-in-out infinite'></span>"
+                        "<span><b style='color:#a5b4fc'>Agent working…</b> "
+                        "you can keep typing — Send will re-enable when the response lands.</span>"
+                        "</div>"
+                        "<style>@keyframes omk-pulse{0%,100%{opacity:1;transform:scale(1)}"
+                        "50%{opacity:.45;transform:scale(.78)}}</style>"
+                    ),
+                    visible=False,
+                )
+
                 with gr.Row():
                     chat_input = gr.Textbox(
                         placeholder="Ask anything about your bookmarks… (you can keep typing while the agent works)",
@@ -1029,17 +1048,6 @@ def build_ui():
                     )
                     send_btn = gr.Button("Send", variant="primary", scale=1, min_width=90)
                     stop_btn = gr.Button("Stop", variant="stop", scale=0, min_width=70)
-
-                def _append_user(msg, history):
-                    """Stage 1 (queue=False so it returns instantly): push the
-                    user message into the chatbot history and clear the textbox.
-                    The textbox stays interactive — the user can immediately
-                    start drafting the next message while the assistant streams."""
-                    msg = (msg or "").strip()
-                    if not msg:
-                        return gr.update(), history or []
-                    history = (history or []) + [{"role": "user", "content": msg}]
-                    return "", history
 
                 def _coerce_content_to_str(c) -> str:
                     """Gradio 6 stores chat message `content` as either a str or
@@ -1057,35 +1065,63 @@ def build_ui():
                         return "\n".join(parts).strip()
                     return str(c or "")
 
-                def _stream_assistant(history, session_id):
-                    """Stage 2 (queued): pop the last user message and stream
-                    the assistant response into a fresh slot. Yields the full
-                    history after each chunk so the chatbot repaints live."""
-                    if not history or history[-1]["role"] != "user":
-                        yield history
+                _SEND_BUSY = gr.update(interactive=False, value="⏳ Working…", variant="secondary")
+                _SEND_IDLE = gr.update(interactive=True, value="Send", variant="primary")
+                _BADGE_ON  = gr.update(visible=True)
+                _BADGE_OFF = gr.update(visible=False)
+
+                def _send_and_stream(msg, history, session_id):
+                    """ONE generator that owns the whole send→stream→done flow.
+                    Splitting this across .then(_busy_on).then(_stream).then(_busy_off)
+                    breaks live streaming in gradio 6 — the chained generator's
+                    yields get batched and the chatbot only repaints AT THE END.
+                    Keeping everything in one generator preserves per-yield SSE
+                    repaints, so the user watches tool cards land live."""
+                    msg = (msg or "").strip()
+                    if not msg:
+                        # Nothing to send — leave UI alone.
+                        yield gr.update(), history or [], _SEND_IDLE, _BADGE_OFF
                         return
-                    user_msg = _coerce_content_to_str(history[-1]["content"])
+
+                    # Stage 1 — instant repaint: clear textbox, push user msg,
+                    # disable Send, show "working" badge.
+                    history = (history or []) + [{"role": "user", "content": msg}]
+                    yield "", history, _SEND_BUSY, _BADGE_ON
+
+                    # Stage 2 — stream the assistant response into a fresh slot.
                     history = history + [{"role": "assistant", "content": ""}]
+                    user_msg = _coerce_content_to_str(history[-2]["content"])
                     for chunk in chat_fn(user_msg, history[:-1], session_id):
                         history[-1]["content"] = chunk
-                        yield history
+                        # textbox + busy state unchanged during streaming; only
+                        # the chatbot history mutates.
+                        yield gr.update(), history, _SEND_BUSY, _BADGE_ON
 
+                    # Stage 3 — done. Flip Send back to idle and hide the badge.
+                    yield gr.update(), history, _SEND_IDLE, _BADGE_OFF
+
+                _send_outputs = [chat_input, chatbot, send_btn, status_badge]
                 submit_evt = chat_input.submit(
-                    _append_user, [chat_input, chatbot], [chat_input, chatbot],
-                    queue=False, show_progress="hidden",
-                ).then(
-                    _stream_assistant, [chatbot, session_id_state], [chatbot],
-                    show_progress="minimal",
+                    _send_and_stream,
+                    [chat_input, chatbot, session_id_state],
+                    _send_outputs,
+                    show_progress="hidden",
                 )
                 click_evt = send_btn.click(
-                    _append_user, [chat_input, chatbot], [chat_input, chatbot],
-                    queue=False, show_progress="hidden",
-                ).then(
-                    _stream_assistant, [chatbot, session_id_state], [chatbot],
-                    show_progress="minimal",
+                    _send_and_stream,
+                    [chat_input, chatbot, session_id_state],
+                    _send_outputs,
+                    show_progress="hidden",
                 )
-                stop_btn.click(fn=None, inputs=None, outputs=None,
-                               cancels=[submit_evt, click_evt])
+                # Stop button: cancel the active generation AND flip the busy
+                # state back so the UI doesn't get stuck in "Working…".
+                def _stop_reset():
+                    return _SEND_IDLE, _BADGE_OFF
+                stop_btn.click(
+                    _stop_reset, None, [send_btn, status_badge],
+                    cancels=[submit_evt, click_evt],
+                    queue=False, show_progress="hidden",
+                )
 
                 # Wire history controls — load / new / delete / refresh.
                 # All three "switch the active session" actions MUST cancel
@@ -1099,6 +1135,9 @@ def build_ui():
                     outputs=[chatbot, session_id_state],
                     show_progress="hidden",
                     cancels=[submit_evt, click_evt],
+                ).then(
+                    _stop_reset, None, [send_btn, status_badge],
+                    queue=False, show_progress="hidden",
                 )
                 new_chat_btn.click(
                     fn=_new_chat,
@@ -1106,6 +1145,9 @@ def build_ui():
                     outputs=[chatbot, session_id_state, session_dd],
                     show_progress="hidden",
                     cancels=[submit_evt, click_evt],
+                ).then(
+                    _stop_reset, None, [send_btn, status_badge],
+                    queue=False, show_progress="hidden",
                 )
                 delete_btn.click(
                     fn=_delete_chat,
@@ -1113,6 +1155,9 @@ def build_ui():
                     outputs=[chatbot, session_id_state, session_dd],
                     show_progress="hidden",
                     cancels=[submit_evt, click_evt],
+                ).then(
+                    _stop_reset, None, [send_btn, status_badge],
+                    queue=False, show_progress="hidden",
                 )
                 refresh_btn.click(
                     fn=_refresh_sessions,
