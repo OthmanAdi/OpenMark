@@ -114,6 +114,7 @@ def _get_graph():
             summarization_trigger=("tokens", 60_000),
             context_edit_trigger=80_000,
             context_edit_keep=6,
+            mcp_scope="researcher",             # merges TrendRadar et al when enabled
         )
     return _RESEARCHER_GRAPH
 

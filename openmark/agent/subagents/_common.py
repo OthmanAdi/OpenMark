@@ -37,6 +37,8 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from pydantic import BaseModel
 
 from openmark.agent.llms import build_summarizer
+from openmark.agent.mcp import load_tools_for as _load_mcp_tools_for
+from openmark.agent.mcp.registry import Scope
 from openmark.agent.middleware import (
     OpenMarkSkillMiddleware,
     load_skill as _load_skill_tool,
@@ -57,6 +59,7 @@ def make_subagent_graph(
     run_limit: int = 8,
     extra_middleware: Sequence[AgentMiddleware] | None = None,
     include_skills: bool = True,
+    mcp_scope: Scope | None = None,
 ):
     """
     Compile a sub-agent graph with our standard middleware stack.
@@ -107,12 +110,17 @@ def make_subagent_graph(
     #   - caller-supplied tools (researcher's 21 retrieval tools, skill-author's
     #     write_skill, composers' empty list)
     #   - PLUS load_skill so the sub-agent can fetch any SKILL.md body on demand
+    #   - PLUS any MCP-server tools mapped to this scope in the registry
     # We add load_skill explicitly here (in addition to OpenMarkSkillMiddleware.tools)
     # because create_agent merges middleware tools, but bare-tool registration is
     # the deterministic path — never trust transitive inclusion.
     merged_tools: list[Any] = list(tools or [])
     if include_skills and _load_skill_tool not in merged_tools:
         merged_tools.append(_load_skill_tool)
+    if mcp_scope is not None:
+        mcp_tools = _load_mcp_tools_for(mcp_scope)
+        if mcp_tools:
+            merged_tools.extend(mcp_tools)
 
     kwargs: dict[str, Any] = dict(
         model=model,

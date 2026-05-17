@@ -99,8 +99,14 @@ def build_agent():
     # Tools the orchestrator can call directly:
     # - 10 task_* delegators (sub-agents)
     # - write_skill (sandboxed skill author shortcut)
+    # - any MCP-server tools mapped to scope='orchestrator' in the registry
     # NOTE: load_skill is auto-registered by OpenMarkSkillMiddleware.
-    orchestrator_tools = list(ALL_SUBAGENT_TOOLS) + [write_skill]
+    from openmark.agent.mcp import load_tools_for as _load_mcp_tools_for
+    orchestrator_tools: list = list(ALL_SUBAGENT_TOOLS) + [write_skill]
+    mcp_tools = _load_mcp_tools_for("orchestrator")
+    if mcp_tools:
+        orchestrator_tools.extend(mcp_tools)
+        log.info(f"[build_agent] added {len(mcp_tools)} MCP tools at orchestrator scope")
 
     middleware = [
         # 1. Classify intent ONCE per thread. ALSO detects user-named skills
