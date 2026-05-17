@@ -430,24 +430,41 @@ def chat_fn(message: str, history: list, session_id: int | None):
                 else:
                     # Auto-export when the agent's markdown looks like a Report.
                     final = _maybe_export_report(raw)
-                # Fallback: only show batched thinking if per-turn didn't stream.
+
+                # Build a single collapsed <details> wrapping every prior part
+                # (tool cards + per-turn thinking bubbles). This lives BELOW
+                # the final answer in the final bubble layout, so the user
+                # always lands on the final markdown without scrolling past
+                # 50k+ chars of tool cards. Streaming during the turn already
+                # showed the tool cards live; the collapsible just keeps them
+                # available for review.
+                collapsed_trace = (
+                    f"<details style='margin:14px 0;border:1px solid #1e293b;"
+                    f"border-radius:6px;padding:6px 10px;background:#0b1220'>"
+                    f"<summary style='cursor:pointer;color:#94a3b8;font-size:0.85em'>"
+                    f"🛠 <b style='color:#cbd5e1'>{n_calls} tool call(s) "
+                    f"+ reasoning trace</b> — click to expand</summary>"
+                    f"\n\n" + "\n\n".join(parts) + "\n\n</details>"
+                )
+
+                # Optional batched-thinking block (only fires when per-turn
+                # streaming didn't already render thinking bubbles inline).
+                thinking_block = ""
                 if thinking_text:
-                    parts.append(
+                    thinking_block = (
                         "<details><summary>🧠 <b>Thinking (full trace)</b> · "
-                        f"{n_calls} tool call(s) · codex 5.3 reasoning=high</summary>\n\n"
+                        f"{n_calls} tool call(s)</summary>\n\n"
                         f"```\n{thinking_text}\n```\n\n</details>"
                     )
-                # Sentinel separator so the markdown parser EXITS any open HTML
-                # block context before reading the final answer. Without the
-                # blank lines + <hr>, markdown-it stays in HTML-block mode
-                # (started by the tool-card <div>s above) and never renders
-                # the final markdown — bug observed in sessions 60-63 where
-                # the answer was persisted in SQLite but invisible in the UI.
-                parts.append(
-                    "\n\n<hr style='border:none;border-top:1px solid #1e293b;"
-                    "margin:14px 0' />\n\n"
-                    + final
-                )
+
+                # FINAL layout: final answer FIRST so the user lands on it,
+                # then thinking (if any), then collapsed tool trace. Replaces
+                # `parts` entirely so subsequent yields render this shape.
+                parts = [final]
+                if thinking_block:
+                    parts.append(thinking_block)
+                parts.append(collapsed_trace)
+
                 log.info(f"[chat_fn] final emitted: {len(final):,} chars, "
                          f"first 80={final[:80]!r}")
             yield "\n\n".join(parts)
@@ -967,55 +984,135 @@ def build_ui():
                         "</div>"
                     )
 
-                chat_ui = gr.ChatInterface(
-                    fn=chat_fn,
-                    additional_inputs=[session_id_state],
-                    chatbot=gr.Chatbot(
-                        height=620,
-                        placeholder=(
-                            "<div style='text-align:center;color:#475569;padding:40px'>"
-                            "<div style='font-size:2em'>🔖</div>"
-                            "<div style='margin-top:6px'>Ask anything about your "
-                            f"{_bm_count if isinstance(_bm_count, str) else 'saved'} bookmarks</div>"
-                            "<div style='font-size:0.8em;margin-top:10px;color:#64748b'>"
-                            "Try: &nbsp;<i>What did I save this week?</i> &nbsp;·&nbsp; "
-                            "<i>/deep-research RAG patterns</i> &nbsp;·&nbsp; "
-                            "<i>/newsletter on context engineering</i> &nbsp;·&nbsp; "
-                            "<i>/bookmark-dive https://...</i>"
-                            "</div></div>"
-                        ),
-                        latex_delimiters=[
-                            {"left": "$$", "right": "$$", "display": True},
-                            {"left": "$",  "right": "$",  "display": False},
-                            {"left": "\\(", "right": "\\)", "display": False},
-                            {"left": "\\[", "right": "\\]", "display": True},
-                        ],
-                        sanitize_html=False,
-                        render_markdown=True,
+                # Manual chat layout (NOT gr.ChatInterface). ChatInterface
+                # disables the textbox while a generation streams — we want the
+                # user to be free to keep typing while the agent works. Splitting
+                # the submit into (a) instant "append user msg + clear textbox"
+                # and (b) queued "stream assistant response" achieves that: step
+                # (a) runs with queue=False so the textbox empties immediately
+                # and is interactive again; step (b) runs in the queue but
+                # leaves the textbox alone.
+                chatbot = gr.Chatbot(
+                    height=620,
+                    placeholder=(
+                        "<div style='text-align:center;color:#475569;padding:40px'>"
+                        "<div style='font-size:2em'>🔖</div>"
+                        "<div style='margin-top:6px'>Ask anything about your "
+                        f"{_bm_count if isinstance(_bm_count, str) else 'saved'} bookmarks</div>"
+                        "<div style='font-size:0.8em;margin-top:10px;color:#64748b'>"
+                        "Try: &nbsp;<i>What did I save this week?</i> &nbsp;·&nbsp; "
+                        "<i>/deep-research RAG patterns</i> &nbsp;·&nbsp; "
+                        "<i>/newsletter on context engineering</i> &nbsp;·&nbsp; "
+                        "<i>/bookmark-dive https://...</i>"
+                        "</div></div>"
                     ),
-                    submit_btn="Send",
-                    stop_btn="Stop",
-                    fill_height=False,
+                    latex_delimiters=[
+                        {"left": "$$", "right": "$$", "display": True},
+                        {"left": "$",  "right": "$",  "display": False},
+                        {"left": "\\(", "right": "\\)", "display": False},
+                        {"left": "\\[", "right": "\\]", "display": True},
+                    ],
+                    sanitize_html=False,
+                    render_markdown=True,
                 )
 
-                # Wire history controls — load / new / delete / refresh
+                with gr.Row():
+                    chat_input = gr.Textbox(
+                        placeholder="Ask anything about your bookmarks… (you can keep typing while the agent works)",
+                        show_label=False,
+                        scale=8,
+                        container=False,
+                        autofocus=True,
+                        lines=1,
+                        max_lines=6,
+                        interactive=True,
+                    )
+                    send_btn = gr.Button("Send", variant="primary", scale=1, min_width=90)
+                    stop_btn = gr.Button("Stop", variant="stop", scale=0, min_width=70)
+
+                def _append_user(msg, history):
+                    """Stage 1 (queue=False so it returns instantly): push the
+                    user message into the chatbot history and clear the textbox.
+                    The textbox stays interactive — the user can immediately
+                    start drafting the next message while the assistant streams."""
+                    msg = (msg or "").strip()
+                    if not msg:
+                        return gr.update(), history or []
+                    history = (history or []) + [{"role": "user", "content": msg}]
+                    return "", history
+
+                def _coerce_content_to_str(c) -> str:
+                    """Gradio 6 stores chat message `content` as either a str or
+                    a list of multimodal blocks like `[{type:'text', text:...}]`.
+                    chat_fn / history.auto_title need a flat string."""
+                    if isinstance(c, str):
+                        return c
+                    if isinstance(c, list):
+                        parts = []
+                        for b in c:
+                            if isinstance(b, dict) and isinstance(b.get("text"), str):
+                                parts.append(b["text"])
+                            elif isinstance(b, str):
+                                parts.append(b)
+                        return "\n".join(parts).strip()
+                    return str(c or "")
+
+                def _stream_assistant(history, session_id):
+                    """Stage 2 (queued): pop the last user message and stream
+                    the assistant response into a fresh slot. Yields the full
+                    history after each chunk so the chatbot repaints live."""
+                    if not history or history[-1]["role"] != "user":
+                        yield history
+                        return
+                    user_msg = _coerce_content_to_str(history[-1]["content"])
+                    history = history + [{"role": "assistant", "content": ""}]
+                    for chunk in chat_fn(user_msg, history[:-1], session_id):
+                        history[-1]["content"] = chunk
+                        yield history
+
+                submit_evt = chat_input.submit(
+                    _append_user, [chat_input, chatbot], [chat_input, chatbot],
+                    queue=False, show_progress="hidden",
+                ).then(
+                    _stream_assistant, [chatbot, session_id_state], [chatbot],
+                    show_progress="minimal",
+                )
+                click_evt = send_btn.click(
+                    _append_user, [chat_input, chatbot], [chat_input, chatbot],
+                    queue=False, show_progress="hidden",
+                ).then(
+                    _stream_assistant, [chatbot, session_id_state], [chatbot],
+                    show_progress="minimal",
+                )
+                stop_btn.click(fn=None, inputs=None, outputs=None,
+                               cancels=[submit_evt, click_evt])
+
+                # Wire history controls — load / new / delete / refresh.
+                # All three "switch the active session" actions MUST cancel
+                # the currently streaming generation. Otherwise clicking
+                # "New chat" while the agent is mid-stream silently leaves
+                # the old task running in the background (still burning tokens,
+                # still writing checkpointed state to the OLD session).
                 session_dd.change(
                     fn=_load_session,
                     inputs=[session_dd],
-                    outputs=[chat_ui.chatbot, session_id_state],
+                    outputs=[chatbot, session_id_state],
                     show_progress="hidden",
+                    cancels=[submit_evt, click_evt],
                 )
                 new_chat_btn.click(
                     fn=_new_chat,
                     inputs=None,
-                    outputs=[chat_ui.chatbot, session_id_state, session_dd],
+                    outputs=[chatbot, session_id_state, session_dd],
                     show_progress="hidden",
+                    cancels=[submit_evt, click_evt],
                 )
                 delete_btn.click(
                     fn=_delete_chat,
                     inputs=[session_dd],
-                    outputs=[chat_ui.chatbot, session_id_state, session_dd],
+                    outputs=[chatbot, session_id_state, session_dd],
                     show_progress="hidden",
+                    cancels=[submit_evt, click_evt],
                 )
                 refresh_btn.click(
                     fn=_refresh_sessions,
@@ -1026,8 +1123,7 @@ def build_ui():
 
                 # After every assistant reply, refresh the dropdown so the
                 # (auto-titled) current chat moves to the top of the list.
-                # chat_ui exposes .chatbot for change events.
-                chat_ui.chatbot.change(
+                chatbot.change(
                     fn=_refresh_sessions,
                     inputs=None,
                     outputs=[session_dd],
@@ -1039,7 +1135,7 @@ def build_ui():
                     skill_picker.change(
                         fn=lambda v: v or "",
                         inputs=[skill_picker],
-                        outputs=[chat_ui.textbox],
+                        outputs=[chat_input],
                         show_progress="hidden",
                     )
 
