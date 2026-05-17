@@ -7,6 +7,7 @@ OpenMark Gradio UI — 3 tabs:
 
 import sys
 import os
+import logging
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -15,6 +16,8 @@ import json as _json
 import base64 as _b64
 from openmark import config
 from openmark import history as _history
+
+log = logging.getLogger("openmark.ui")
 
 # Chat history DB — survives refresh, restart, and crashes. Persists every
 # message exactly as the user saw it.
@@ -434,16 +437,28 @@ def chat_fn(message: str, history: list, session_id: int | None):
                         f"{n_calls} tool call(s) · codex 5.3 reasoning=high</summary>\n\n"
                         f"```\n{thinking_text}\n```\n\n</details>"
                     )
-                parts.append(final)
-            yield "\n".join(parts)
+                # Sentinel separator so the markdown parser EXITS any open HTML
+                # block context before reading the final answer. Without the
+                # blank lines + <hr>, markdown-it stays in HTML-block mode
+                # (started by the tool-card <div>s above) and never renders
+                # the final markdown — bug observed in sessions 60-63 where
+                # the answer was persisted in SQLite but invisible in the UI.
+                parts.append(
+                    "\n\n<hr style='border:none;border-top:1px solid #1e293b;"
+                    "margin:14px 0' />\n\n"
+                    + final
+                )
+                log.info(f"[chat_fn] final emitted: {len(final):,} chars, "
+                         f"first 80={final[:80]!r}")
+            yield "\n\n".join(parts)
     except Exception as e:
         parts.append(f"\n\n❌ **Agent error:** `{e}`")
-        yield "\n".join(parts)
+        yield "\n\n".join(parts)
     finally:
         # Persist the assistant message exactly as the user saw it, plus the
         # thinking trace and tool events for full replay fidelity.
         try:
-            assistant_md = "\n".join(parts) if parts else "_(no response)_"
+            assistant_md = "\n\n".join(parts) if parts else "_(no response)_"
             full_thinking = (
                 "\n\n---\n\n".join(per_turn_thinking)
                 if per_turn_thinking else thinking_text
