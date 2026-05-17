@@ -206,17 +206,31 @@ def _get_client():
 
 def _wrap_async_only_tool(tool: Any) -> Any:
     """
-    Some MCP-adapted tools come with only `coroutine=` set on the underlying
-    StructuredTool. That triggers `NotImplementedError: StructuredTool does
-    not support sync invocation.` whenever LangChain's ToolNode calls
-    `.invoke()` in our sync agent.
+    Two transformations on each MCP-adapted tool:
 
-    Fix: rebuild the tool with a sync `func=` that schedules the async call
-    on our persistent background loop. The coroutine itself is left in place
-    so an async caller (e.g. `agent.ainvoke()`) still uses the async path.
+    1. Sync invocation bridge.
+       langchain-mcp-adapters returns StructuredTool with only `coroutine=`
+       set, so `.invoke()` raises `NotImplementedError: StructuredTool does
+       not support sync invocation.` under our sync agent. We install a
+       sync `func` that schedules the coroutine on the persistent background
+       asyncio loop.
 
-    Returns the original instance if it's already sync-callable or not a
-    StructuredTool subclass.
+    2. TOON post-processing.
+       Wrap the underlying coroutine so its return value is run through
+       openmark.agent.mcp.toon_codec.toonify_tool_result before it lands in
+       the agent's context. MCP tool results are usually nested JSON; TOON
+       saves 30-60% on uniform/tabular shapes (TrendRadar returns a lot of
+       these). Lossless either way — if the text isn't JSON or TOON isn't
+       materially smaller, the original text passes through untouched.
+
+    Implementation note: `tool.model_copy(update={'coroutine': ...})` does NOT
+    reliably swap the `coroutine` field on StructuredTool under Pydantic v2
+    (the copy machinery treats it as a default-having field and discards the
+    update). We use object.__setattr__ to bypass the model setter — safe
+    because Pydantic models are plain Python classes underneath.
+
+    Returns the original instance when the tool is already sync-callable AND
+    has no async coroutine to wrap, so this is safe to call on every tool.
     """
     try:
         from langchain_core.tools import StructuredTool
@@ -224,17 +238,30 @@ def _wrap_async_only_tool(tool: Any) -> Any:
         return tool
     if not isinstance(tool, StructuredTool):
         return tool
-    if getattr(tool, "func", None) is not None:
-        return tool
     coroutine = getattr(tool, "coroutine", None)
     if coroutine is None:
         return tool
 
+    from openmark.agent.mcp.toon_codec import toonify_tool_result
+
+    async def _toon_coro(*args, **kwargs):
+        raw = await coroutine(*args, **kwargs)
+        try:
+            return toonify_tool_result(raw)
+        except Exception as e:  # noqa: BLE001
+            log.debug(f"[toon] post-process skipped: {type(e).__name__}: {e}")
+            return raw
+
     def _sync_run(*args, **kwargs):
-        return _run_coro_sync(coroutine(*args, **kwargs))
+        return _run_coro_sync(_toon_coro(*args, **kwargs))
 
     _sync_run.__name__ = getattr(coroutine, "__name__", "mcp_sync_run")
-    return tool.model_copy(update={"func": _sync_run})
+
+    wrapped = tool.model_copy()
+    object.__setattr__(wrapped, "coroutine", _toon_coro)
+    if getattr(wrapped, "func", None) is None:
+        object.__setattr__(wrapped, "func", _sync_run)
+    return wrapped
 
 
 def _gather_tools_sync(server_names: list[str]) -> list[Any]:
