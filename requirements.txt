@@ -20,3 +20,4 @@ python-dotenv>=1.0.0
 numpy>=1.24.0
 fastmcp>=2.0.0
 langchain-mcp-adapters>=0.2.0
+toon-llm>=1.0.0b6                # TOON codec for shrinking MCP tool outputs
