@@ -352,9 +352,20 @@ You have ZERO retrieval tools yourself. Every search / fetch goes through
 polish or humanize goes through `task_polish` / `task_humanize`. Every
 verification goes through `task_verify`. Use `write_todos` to plan first.
 
-CURRENT KNOWLEDGE BASE
-- {bookmarks:,} bookmarks across {tags:,} tags, {categories} categories, {communities} communities.
-- Stored in Neo4j Graph RAG with pplx-embed 1024-dim vectors.
+WHEN TO USE THE PERSONAL KB vs THE OPEN WEB
+- The user has a personal knowledge base of {bookmarks:,} bookmarks across
+  {tags:,} tags, {categories} categories, {communities} communities. It lives
+  in Neo4j Graph RAG with pplx-embed 1024-dim vectors.
+- Use it ONLY when the user's request is about THEIR saved content
+  ("my bookmarks", "what I saved", "weekly digest", "bookmark-dive <URL>",
+  /fast-search, /weekly-digest, /bookmark-dive, /repo-research,
+  /newsletter-* that pulls from saves).
+- For general research, fresh trends, comparisons, "what's the state of X",
+  external URLs, hot topics — the open web + TrendRadar are equally valid
+  starting points. Do NOT push the researcher to query the KB for content
+  it cannot possibly contain.
+- If the KB or any tool is down (e.g. "Couldn't connect" errors), the
+  researcher will fall back automatically. Do not retry dead tools.
 
 SUB-AGENTS YOU CAN DELEGATE TO
 - task_researcher(brief)          — retrieval + web research, returns anchor list.
@@ -392,11 +403,35 @@ OUTPUT
 
 
 _INTENT_HINTS: dict[str, str] = {
-    "fast":       "INTENT: fast. Single task_researcher call, surface 5-10 bookmarks. No composers.",
-    "deep":       "INTENT: deep. Multi-angle research via 1-2 task_researcher calls, then a concise synthesis.",
-    "newsletter": "INTENT: newsletter. Full compose loop: researcher -> compose_<format> -> polish/humanize -> verify -> return.",
-    "digest":     "INTENT: digest. task_researcher with time window, group by category, compact bulleted output.",
-    "dive":       "INTENT: dive. task_researcher with the URL + 'graph_expand and SIMILAR_TO neighbors'. Return structured neighborhood.",
+    "fast":       (
+        "INTENT: fast. Single task_researcher call to surface 5-10 items the "
+        "user has SAVED in their KB. Skip web tools unless the KB returns "
+        "empty. No composers."
+    ),
+    "deep":       (
+        "INTENT: deep. Multi-angle research. The task_researcher should "
+        "treat OpenMark KB, the open web, and TrendRadar as EQUAL first "
+        "choices — pick whichever fits the question, fan out in parallel "
+        "when unclear. Synthesize across all surfaces. Do not insist on the "
+        "KB if the question isn't about saved content."
+    ),
+    "newsletter": (
+        "INTENT: newsletter. Full compose loop: researcher -> compose_<format> "
+        "-> polish/humanize -> verify -> return. Researcher should prefer "
+        "OpenMark anchors WHEN the user's brief is about their saves; "
+        "otherwise web + TrendRadar are equally valid anchor sources."
+    ),
+    "digest":     (
+        "INTENT: digest. task_researcher with time window using find_recent / "
+        "search_by_date_range on the OpenMark KB. Group by category, compact "
+        "bulleted output."
+    ),
+    "dive":       (
+        "INTENT: dive. task_researcher with the URL + graph_expand for "
+        "SIMILAR_TO neighbors IF the URL is in the OpenMark KB. If it's an "
+        "external URL not yet saved, use web_fetch / github_repo_intel "
+        "instead. Return structured neighborhood."
+    ),
 }
 
 
