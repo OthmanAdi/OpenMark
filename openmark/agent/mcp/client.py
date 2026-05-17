@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,55 @@ from typing import Any
 # `import openmark...` even when they run in a different venv (TrendRadar's,
 # for example). We inject this into PYTHONPATH for every stdio connection.
 _OPENMARK_ROOT = str(Path(__file__).resolve().parents[3])
+
+
+# ── Persistent background asyncio loop ──────────────────────────────────────
+#
+# MCP servers are long-lived async resources (stdio subprocess + reader/writer
+# streams). If we spin up a fresh `asyncio.run()` per call, every tool
+# invocation would re-spawn the server. With TrendRadar that's a 4s tax per
+# call — fatal for an agent that wants to chain 5+ tool calls.
+#
+# Solution: a dedicated background thread runs ONE event loop for the process
+# lifetime. Tool loading + per-call invocation both submit coroutines to it
+# via `asyncio.run_coroutine_threadsafe`. The MCP stdio subprocess stays open
+# on that loop's transport, reused across calls.
+#
+# Crucial side effect: our agent runs sync (`agent.stream(stream_mode='updates')`)
+# but the MCP tool the adapter returns has only `coroutine=` set (no `func=`).
+# `StructuredTool._run()` then raises NotImplementedError. The bridge below
+# rebuilds each tool with `func=` set to a sync shim that schedules the
+# coroutine on the background loop and blocks for the result.
+
+_BG_LOOP: asyncio.AbstractEventLoop | None = None
+_BG_THREAD: threading.Thread | None = None
+_BG_LOOP_LOCK = threading.Lock()
+
+
+def _ensure_bg_loop() -> asyncio.AbstractEventLoop:
+    """Start the background asyncio thread on first call. Idempotent."""
+    global _BG_LOOP, _BG_THREAD
+    with _BG_LOOP_LOCK:
+        if _BG_LOOP is not None and _BG_LOOP.is_running():
+            return _BG_LOOP
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(
+            target=loop.run_forever,
+            daemon=True,
+            name="openmark-mcp-bg-loop",
+        )
+        thread.start()
+        _BG_LOOP = loop
+        _BG_THREAD = thread
+        log.info("[mcp] background asyncio loop started")
+        return loop
+
+
+def _run_coro_sync(coro):
+    """Submit a coroutine to the background loop and block for its result."""
+    loop = _ensure_bg_loop()
+    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+    return fut.result()
 
 from openmark.agent.mcp.registry import (
     SERVER_REGISTRY,
@@ -154,19 +204,48 @@ def _get_client():
     return _CLIENT
 
 
+def _wrap_async_only_tool(tool: Any) -> Any:
+    """
+    Some MCP-adapted tools come with only `coroutine=` set on the underlying
+    StructuredTool. That triggers `NotImplementedError: StructuredTool does
+    not support sync invocation.` whenever LangChain's ToolNode calls
+    `.invoke()` in our sync agent.
+
+    Fix: rebuild the tool with a sync `func=` that schedules the async call
+    on our persistent background loop. The coroutine itself is left in place
+    so an async caller (e.g. `agent.ainvoke()`) still uses the async path.
+
+    Returns the original instance if it's already sync-callable or not a
+    StructuredTool subclass.
+    """
+    try:
+        from langchain_core.tools import StructuredTool
+    except ImportError:
+        return tool
+    if not isinstance(tool, StructuredTool):
+        return tool
+    if getattr(tool, "func", None) is not None:
+        return tool
+    coroutine = getattr(tool, "coroutine", None)
+    if coroutine is None:
+        return tool
+
+    def _sync_run(*args, **kwargs):
+        return _run_coro_sync(coroutine(*args, **kwargs))
+
+    _sync_run.__name__ = getattr(coroutine, "__name__", "mcp_sync_run")
+    return tool.model_copy(update={"func": _sync_run})
+
+
 def _gather_tools_sync(server_names: list[str]) -> list[Any]:
-    """Sync wrapper around the async get_tools call. Returns empty list on
-    any error so an MCP failure never crashes agent boot."""
+    """Load tools from every named server on the background asyncio loop and
+    return them with sync `func=` wrappers installed. Empty list on failure."""
     client = _get_client()
     if client is None or not server_names:
         return []
 
     async def _async_load() -> list[Any]:
-        # MultiServerMCPClient.get_tools(server_name=...) loads from one
-        # server at a time; we concatenate. Concurrent gather keeps boot fast.
-        gathers = [
-            client.get_tools(server_name=name) for name in server_names
-        ]
+        gathers = [client.get_tools(server_name=name) for name in server_names]
         results: list[list[Any]] = await asyncio.gather(*gathers, return_exceptions=False)
         flat: list[Any] = []
         for r in results:
@@ -174,22 +253,20 @@ def _gather_tools_sync(server_names: list[str]) -> list[Any]:
         return flat
 
     try:
-        # Use asyncio.run() — build_agent runs in sync context once at boot.
-        return asyncio.run(_async_load())
-    except RuntimeError as e:
-        # Most common: "asyncio.run() cannot be called from a running event loop".
-        # Fall back to nest_asyncio-style execution via a fresh loop.
-        log.info(f"[mcp] asyncio.run failed ({e!r}); retrying with new loop")
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(_async_load())
-        finally:
-            loop.close()
+        raw = _run_coro_sync(_async_load())
     except Exception as e:
         for name in server_names:
             _LOAD_FAILED[name] = f"{type(e).__name__}: {e}"
         log.warning(f"[mcp] tool load failed for {server_names}: {e!r}")
         return []
+
+    # Wrap each tool with a sync shim so LangChain's sync ToolNode can call it
+    wrapped = [_wrap_async_only_tool(t) for t in raw]
+    log.info(
+        f"[mcp] wrapped {len(wrapped)} tool(s) with sync->async bridge "
+        f"(persistent background loop)"
+    )
+    return wrapped
 
 
 def load_tools_for(scope: Scope) -> list[Any]:
