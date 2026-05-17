@@ -29,6 +29,16 @@ def test_registry_lists_trendradar():
     )
 
 
+def test_trendradar_excludes_broken_get_current_config():
+    """TrendRadar v6.7.0's get_current_config crashes with
+    'Object of type Pattern is not JSON serializable' — must be denylisted."""
+    from openmark.agent.mcp.registry import SERVER_REGISTRY
+    exclude = SERVER_REGISTRY["trendradar"].get("exclude_tool_suffixes", [])
+    assert "get_current_config" in exclude, (
+        "get_current_config is upstream-broken; keep it on the denylist"
+    )
+
+
 def test_default_disabled(monkeypatch):
     """Without OPENMARK_MCP_TRENDRADAR, no servers should be enabled."""
     monkeypatch.delenv("OPENMARK_MCP_TRENDRADAR", raising=False)

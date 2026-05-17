@@ -265,30 +265,57 @@ def _wrap_async_only_tool(tool: Any) -> Any:
 
 
 def _gather_tools_sync(server_names: list[str]) -> list[Any]:
-    """Load tools from every named server on the background asyncio loop and
-    return them with sync `func=` wrappers installed. Empty list on failure."""
+    """Load tools from every named server on the background asyncio loop,
+    drop any names blocked by the per-server `exclude_tool_suffixes` denylist,
+    return survivors with sync `func=` wrappers installed.
+
+    Empty list on failure — never raises."""
     client = _get_client()
     if client is None or not server_names:
         return []
 
-    async def _async_load() -> list[Any]:
-        gathers = [client.get_tools(server_name=name) for name in server_names]
-        results: list[list[Any]] = await asyncio.gather(*gathers, return_exceptions=False)
-        flat: list[Any] = []
-        for r in results:
-            flat.extend(r)
-        return flat
+    async def _async_load() -> dict[str, list[Any]]:
+        # Load per-server so we can match denylist suffixes back to the
+        # owning spec (the tool name carries the server prefix, but the
+        # exclude list lives on the SPEC, not the prefixed name).
+        results: dict[str, list[Any]] = {}
+        async def _load_one(name: str):
+            results[name] = await client.get_tools(server_name=name)
+        await asyncio.gather(*[_load_one(n) for n in server_names])
+        return results
 
     try:
-        raw = _run_coro_sync(_async_load())
+        per_server = _run_coro_sync(_async_load())
     except Exception as e:
         for name in server_names:
             _LOAD_FAILED[name] = f"{type(e).__name__}: {e}"
         log.warning(f"[mcp] tool load failed for {server_names}: {e!r}")
         return []
 
-    # Wrap each tool with a sync shim so LangChain's sync ToolNode can call it
-    wrapped = [_wrap_async_only_tool(t) for t in raw]
+    flat: list[Any] = []
+    dropped: list[str] = []
+    for server_name, tools in per_server.items():
+        spec = SERVER_REGISTRY.get(server_name, {})
+        exclude = set(spec.get("exclude_tool_suffixes", []) or [])
+        prefix = spec.get("name_prefix") or server_name
+        for tool in tools:
+            tool_name = getattr(tool, "name", "")
+            # langchain-mcp-adapters with tool_name_prefix=True names tools
+            # "<server>_<orig>"; the denylist uses the bare original suffix.
+            unprefixed = tool_name
+            for p in (f"{prefix}_", f"{server_name}_"):
+                if unprefixed.startswith(p):
+                    unprefixed = unprefixed[len(p):]
+                    break
+            if unprefixed in exclude:
+                dropped.append(tool_name)
+                continue
+            flat.append(tool)
+
+    if dropped:
+        log.info(f"[mcp] dropped {len(dropped)} tool(s) via exclude_tool_suffixes: {dropped}")
+
+    wrapped = [_wrap_async_only_tool(t) for t in flat]
     log.info(
         f"[mcp] wrapped {len(wrapped)} tool(s) with sync->async bridge "
         f"(persistent background loop)"

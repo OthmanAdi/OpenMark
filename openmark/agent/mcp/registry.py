@@ -65,6 +65,12 @@ class MCPServerSpec(TypedDict, total=False):
     # http
     url: str
 
+    # Tool name suffixes to drop after the prefix is applied. Used when an
+    # upstream MCP server exposes a tool that's broken or irrelevant. Match
+    # is suffix-only — e.g. for trendradar's prefixed `trendradar_get_current_config`
+    # add `get_current_config` here.
+    exclude_tool_suffixes: list[str]
+
     # docs
     description: str
 
@@ -132,6 +138,15 @@ SERVER_REGISTRY: dict[str, MCPServerSpec] = {
             "PYTHONPATH",
         ],
         "cwd": TRENDRADAR_HOME,
+        # Upstream-broken or never-needed tools. TrendRadar v6.7.0's
+        # get_current_config raises `Object of type Pattern is not JSON
+        # serializable` because their config holds compiled re.Pattern
+        # instances from frequency_words.txt regex syntax. We drop it
+        # rather than pass the broken error to the agent (which would
+        # otherwise burn 3-4 retry cycles per turn).
+        "exclude_tool_suffixes": [
+            "get_current_config",
+        ],
         "description": (
             "Trend monitor over Chinese hot platforms + RSS sources + AI "
             "analysis briefs. Researcher uses it for 'what's trending in "
