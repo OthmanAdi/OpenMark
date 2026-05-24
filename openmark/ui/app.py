@@ -7,6 +7,7 @@ OpenMark Gradio UI — 3 tabs:
 
 import sys
 import os
+import time
 import logging
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 sys.stdout.reconfigure(encoding="utf-8")
@@ -200,6 +201,143 @@ def _esc(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+# ── RTL + Arabic rendering helpers ────────────────────────────────────────────
+# The chat app is Arabic-first for the humanizer skills (/ar-msa, /ar-egt,
+# /ar-shami) and Hebrew (/he). Detect those scripts in the final markdown
+# and wrap the rendered HTML in a dir="rtl" container with proper Arabic
+# typography. URLs and ASCII tokens inside RTL paragraphs auto-flow LTR via
+# the browser's Unicode bidi algorithm, so we don't have to special-case
+# them.
+
+import re as _re_rtl
+
+_RTL_RE = _re_rtl.compile(
+    r"[֐-׿"   # Hebrew block
+    r"؀-ۿ"    # Arabic core
+    r"ݐ-ݿ"    # Arabic Supplement
+    r"ࢠ-ࣿ"    # Arabic Extended-A
+    r"ﭐ-﷿"    # Arabic Presentation Forms-A (ligatures, common rendering)
+    r"ﹰ-﻿]"   # Arabic Presentation Forms-B
+)
+
+
+def _has_rtl(text: str) -> bool:
+    """True if the text contains any RTL-script characters."""
+    return bool(_RTL_RE.search(text or ""))
+
+
+def _wrap_rtl_if_needed(html_or_md: str) -> str:
+    """Wrap the rendered block in a dir='rtl' container with proper Arabic
+    typography only when RTL text is present. No-op for pure LTR content."""
+    if not _has_rtl(html_or_md):
+        return html_or_md
+    return (
+        '<div dir="rtl" lang="ar" '
+        'style="font-family: \'Noto Naskh Arabic\', \'Cairo\', \'Tajawal\', '
+        '\'Amiri\', \'Segoe UI\', \'Tahoma\', system-ui, sans-serif; '
+        'line-height: 1.95; text-align: right; font-size: 1.06em; '
+        'word-spacing: 0.04em">'
+        f'\n\n{html_or_md}\n\n'
+        '</div>'
+    )
+
+
+def _clean_copy_block(clean_text: str, *, idx: int) -> str:
+    """Render a hidden source + a visible 'Copy answer' button that copies
+    ONLY the clean markdown text (no surrounding tool cards / HTML markup).
+
+    The Gradio Chatbot's built-in copy button copies the message's full
+    markdown source, which includes every tool-card div, thinking-bubble
+    details, etc. — easily 50k+ chars of markup. Our button uses
+    navigator.clipboard.writeText against a hidden textarea so the user
+    gets exactly the agent's final answer + nothing else.
+    """
+    src_id = f"om-clean-src-{idx}"
+    btn_id = f"om-clean-btn-{idx}"
+    import html as _html_mod
+    # Use a hidden <textarea> so newlines + special chars survive intact.
+    src_html = (
+        f'<textarea id="{src_id}" readonly aria-hidden="true" '
+        f'style="position:absolute;left:-9999px;width:1px;height:1px;'
+        f'overflow:hidden;pointer-events:none">{_html_mod.escape(clean_text)}</textarea>'
+    )
+    btn_html = (
+        f'<button id="{btn_id}" type="button" style="'
+        f'display:inline-flex;align-items:center;gap:6px;'
+        f'background:#1e293b;color:#cbd5e1;border:1px solid #334155;'
+        f'padding:5px 12px;border-radius:6px;font-size:0.82em;cursor:pointer;'
+        f'margin:0 0 10px 0" '
+        f'onclick="(function(b){{const s=document.getElementById(\'{src_id}\');'
+        f'if(!s)return;navigator.clipboard.writeText(s.value).then(function(){{'
+        f'const o=b.innerHTML;b.innerHTML=\'\\u2713 Copied\';'
+        f'setTimeout(function(){{b.innerHTML=o}},1400);}});}})(this)">'
+        f'\U0001f4cb Copy answer</button>'
+    )
+    return src_html + btn_html
+
+
+# ── Todo list rendering ───────────────────────────────────────────────────────
+# The orchestrator's TodoListMiddleware fires write_todos repeatedly to
+# update task status. Without special handling, each fire stacks a raw
+# JSON-dump tool card in the chat (the user complained about 5 cards
+# showing the same list with one status flipped each time).
+#
+# Instead: render write_todos as a single live checklist card. Subsequent
+# fires REPLACE the prior card in place (chat_fn tracks last_todos_idx
+# in parts) so the user sees one panel that updates, not five stacked dumps.
+
+_STATUS_ICON = {
+    "completed":    "✅",   # green check
+    "in_progress":  "⏳",   # hourglass
+    "pending":      "☐",   # ballot box
+    "blocked":      "⚠",   # warning
+}
+_STATUS_COLOR = {
+    "completed":    "#34d399",
+    "in_progress":  "#fbbf24",
+    "pending":      "#94a3b8",
+    "blocked":      "#f87171",
+}
+
+
+def _todo_card(args: dict, *, update_count: int) -> str:
+    """Render a write_todos call as a live checklist (not a JSON dump)."""
+    todos = args.get("todos") or []
+    if not isinstance(todos, list):
+        todos = []
+    n = len(todos)
+    completed = sum(1 for t in todos if isinstance(t, dict) and t.get("status") == "completed")
+    rows: list[str] = []
+    for t in todos:
+        if not isinstance(t, dict):
+            continue
+        st = (t.get("status") or "pending").strip()
+        icon = _STATUS_ICON.get(st, "☐")
+        color = _STATUS_COLOR.get(st, "#cbd5e1")
+        content = (t.get("content") or "").strip()
+        if len(content) > 220:
+            content = content[:217] + "…"
+        rows.append(
+            f"<li style='padding:3px 0;color:{color};font-size:0.9em'>"
+            f"<span style='display:inline-block;width:22px'>{icon}</span>"
+            f"<span style='color:#e2e8f0'>{_esc(content)}</span></li>"
+        )
+    header = (
+        f"\U0001f4cb <b style='color:#e2e8f0'>Todo list</b> "
+        f"<span style='color:#94a3b8'>"
+        f"· {completed}/{n} complete · "
+        f"updated {update_count}× this turn</span>"
+    )
+    return (
+        f"<div style='background:#0f172a;border-left:3px solid #a855f7;"
+        f"padding:8px 14px;margin:8px 0;border-radius:6px'>"
+        f"<div style='margin-bottom:6px;font-size:0.88em'>{header}</div>"
+        f"<ul style='list-style:none;padding:0;margin:0;line-height:1.5'>"
+        + "".join(rows) +
+        f"</ul></div>"
+    )
+
+
 def _tool_card(ev: dict) -> str:
     """Render one tool event as a chat card. End cards show the FULL tool output
     in an expandable <details> block so the user can see every result, not a
@@ -375,6 +513,8 @@ def chat_fn(message: str, history: list, session_id: int | None):
     turn_counter = 0          # one inline thought bubble per AIMessage emitted
     tool_events: list[dict] = []
     per_turn_thinking: list[str] = []
+    last_todos_idx: int | None = None  # in-place slot for write_todos card
+    todos_update_count = 0
 
     try:
         for ev in ask_stream(_agent, message, thread_id=thread_id):
@@ -399,20 +539,51 @@ def chat_fn(message: str, history: list, session_id: int | None):
                         f"</details>"
                     )
             elif kind == "tool_start":
-                parts.append(_tool_card({"phase": "start", "tool": ev["tool"], "args": ev.get("args", {})}))
-                n_calls += 1
-                tool_events.append({"phase": "start", "tool": ev["tool"], "args": ev.get("args", {})})
+                tool_name = ev.get("tool", "")
+                if tool_name == "write_todos":
+                    # tool_start carries the full updated `todos` list as args
+                    # (write_todos is a state-write tool — start args = final
+                    # state). tool_end has no args, just a confirmation
+                    # preview, so we render here and treat the end event as
+                    # a no-op for this tool.
+                    todos_update_count += 1
+                    args_obj = ev.get("args") or {}
+                    if not isinstance(args_obj, dict):
+                        args_obj = {}
+                    card = _todo_card(args_obj, update_count=todos_update_count)
+                    if last_todos_idx is None:
+                        last_todos_idx = len(parts)
+                        parts.append(card)
+                    else:
+                        parts[last_todos_idx] = card
+                    n_calls += 1
+                    tool_events.append({"phase": "start", "tool": tool_name,
+                                        "args": args_obj})
+                else:
+                    parts.append(_tool_card({"phase": "start", "tool": tool_name,
+                                             "args": ev.get("args", {})}))
+                    n_calls += 1
+                    tool_events.append({"phase": "start", "tool": tool_name,
+                                        "args": ev.get("args", {})})
             elif kind == "tool_end":
-                parts.append(_tool_card({
-                    "phase": "end",
-                    "tool": ev["tool"],
-                    "args": {},  # already shown on the start card
-                    "duration_ms": ev.get("duration_ms"),
-                    "result_preview": ev.get("preview", ""),
-                }))
-                tool_events.append({"phase": "end", "tool": ev["tool"],
-                                    "duration_ms": ev.get("duration_ms"),
-                                    "preview_len": len(ev.get("preview", "") or "")})
+                tool_name = ev.get("tool", "")
+                if tool_name == "write_todos":
+                    # Already rendered on tool_start above; end is a no-op
+                    # so we don't leave a duplicate raw card behind.
+                    tool_events.append({"phase": "end", "tool": tool_name,
+                                        "duration_ms": ev.get("duration_ms"),
+                                        "preview_len": len(ev.get("preview", "") or "")})
+                else:
+                    parts.append(_tool_card({
+                        "phase": "end",
+                        "tool": tool_name,
+                        "args": {},  # already shown on the start card
+                        "duration_ms": ev.get("duration_ms"),
+                        "result_preview": ev.get("preview", ""),
+                    }))
+                    tool_events.append({"phase": "end", "tool": tool_name,
+                                        "duration_ms": ev.get("duration_ms"),
+                                        "preview_len": len(ev.get("preview", "") or "")})
             elif kind == "tool_error":
                 parts.append(_tool_card({
                     "phase": "error",
@@ -427,9 +598,11 @@ def chat_fn(message: str, history: list, session_id: int | None):
                 raw = (ev.get("text", "") or "").strip()
                 if not raw:
                     final = "_(no response)_"
+                    clean_final_text = "(no response)"
                 else:
                     # Auto-export when the agent's markdown looks like a Report.
                     final = _maybe_export_report(raw)
+                    clean_final_text = final  # raw markdown for clean copy
 
                 # Build a single collapsed <details> wrapping every prior part
                 # (tool cards + per-turn thinking bubbles). This lives BELOW
@@ -457,16 +630,28 @@ def chat_fn(message: str, history: list, session_id: int | None):
                         f"```\n{thinking_text}\n```\n\n</details>"
                     )
 
-                # FINAL layout: final answer FIRST so the user lands on it,
-                # then thinking (if any), then collapsed tool trace. Replaces
-                # `parts` entirely so subsequent yields render this shape.
-                parts = [final]
+                # RTL detection + clean-copy button.
+                # The Gradio Chatbot's built-in copy button grabs the FULL
+                # markdown source of the bubble (which is now ~50k of HTML
+                # tool cards + tracé). Our `_clean_copy_block` adds an
+                # inline button that copies ONLY the agent's final answer.
+                # The visible final markdown gets a dir="rtl" wrapper when
+                # Arabic/Hebrew text is present so Arabic newsletters render
+                # the way they should (right-aligned, Arabic-friendly font).
+                copy_block = _clean_copy_block(clean_final_text, idx=int(time.time() * 1000))
+                visible_final = _wrap_rtl_if_needed(final)
+
+                # FINAL layout: copy button + final answer FIRST so the user
+                # lands on it, then thinking (if any), then collapsed tool
+                # trace. Replaces `parts` entirely so subsequent yields
+                # render this shape.
+                parts = [copy_block + "\n\n" + visible_final]
                 if thinking_block:
                     parts.append(thinking_block)
                 parts.append(collapsed_trace)
 
                 log.info(f"[chat_fn] final emitted: {len(final):,} chars, "
-                         f"first 80={final[:80]!r}")
+                         f"rtl={_has_rtl(final)} first 80={final[:80]!r}")
             yield "\n\n".join(parts)
     except Exception as e:
         parts.append(f"\n\n❌ **Agent error:** `{e}`")
