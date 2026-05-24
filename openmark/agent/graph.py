@@ -262,7 +262,19 @@ def ask_stream(agent, question: str, thread_id: str = "default"):
       {"kind":"tool_error","tool":..,"error":..}
       {"kind":"turn_thinking","text":..}        — per-AIMessage reasoning
       {"kind":"final","text":..,"tool_calls":N,"structured":<dict|None>}
+
+    Streaming model: agent.stream runs in a daemon thread that pushes chunks
+    into a queue. The main loop polls the tool-event deque every 250ms AND
+    pulls chunks from the queue. This unblocks the long sub-agent calls —
+    when task_researcher takes 3 min, the orchestrator's stream is blocked
+    on its synchronous invoke, but the sub-agent's internal tool events
+    still land in the deque (via the parent-thread contextvar) and the main
+    loop drains + yields them live. Without this, the UI saw nothing for
+    minutes while task_researcher fanned out 16 internal calls.
     """
+    import queue
+    import threading
+
     log.info(f"[ask_stream] q={question[:80]!r} thread={thread_id}")
     yield {"kind": "user", "text": question}
 
@@ -271,44 +283,86 @@ def ask_stream(agent, question: str, thread_id: str = "default"):
     seen_msg_ids: set = set()
     streamed_turn_thinking = False
 
-    try:
-        for chunk in agent.stream(
-            {"messages": [{"role": "user", "content": question}]},
-            config=cfg,
-            stream_mode="updates",
-        ):
-            # Surface per-AIMessage reasoning as it lands.
-            for node_state in (chunk or {}).values():
-                if not isinstance(node_state, dict):
-                    continue
-                for m in (node_state.get("messages", []) or []):
-                    mid = getattr(m, "id", None) or id(m)
-                    if mid in seen_msg_ids:
-                        continue
-                    seen_msg_ids.add(mid)
-                    if getattr(m, "type", "") != "ai":
-                        continue
-                    t = _extract_thinking([m])
-                    if t:
-                        streamed_turn_thinking = True
-                        yield {"kind": "turn_thinking", "text": t}
+    # Bridge: background thread runs agent.stream, main thread polls.
+    chunk_q: "queue.Queue[tuple[str, Any]]" = queue.Queue()
+    _DONE = ("done", None)
 
-            # Flush tool events for this thread.
-            for ev in drain_events(thread_id):
-                phase = ev.get("phase")
-                if phase == "start":
-                    yield {"kind": "tool_start", "tool": ev.get("tool"),
-                           "args": ev.get("args", {})}
-                elif phase == "end":
-                    yield {"kind": "tool_end", "tool": ev.get("tool"),
-                           "duration_ms": ev.get("duration_ms"),
-                           "preview": ev.get("result_preview", "")}
-                elif phase == "error":
-                    yield {"kind": "tool_error", "tool": ev.get("tool"),
-                           "error": ev.get("error", "")}
-    except Exception as e:
-        log.info(f"[ask_stream] exception={e!r}")
-        yield {"kind": "tool_error", "tool": "agent", "error": str(e)}
+    def _runner() -> None:
+        try:
+            for c in agent.stream(
+                {"messages": [{"role": "user", "content": question}]},
+                config=cfg,
+                stream_mode="updates",
+            ):
+                chunk_q.put(("chunk", c))
+            chunk_q.put(_DONE)
+        except Exception as exc:
+            chunk_q.put(("error", repr(exc)))
+
+    runner = threading.Thread(target=_runner, daemon=True, name=f"ask_stream-{thread_id}")
+    runner.start()
+
+    def _flush_events():
+        """Yield every pending tool event for this thread. Caller decides nothing."""
+        out = []
+        for ev in drain_events(thread_id):
+            phase = ev.get("phase")
+            if phase == "start":
+                out.append({"kind": "tool_start", "tool": ev.get("tool"),
+                            "args": ev.get("args", {})})
+            elif phase == "end":
+                out.append({"kind": "tool_end", "tool": ev.get("tool"),
+                            "duration_ms": ev.get("duration_ms"),
+                            "preview": ev.get("result_preview", "")})
+            elif phase == "error":
+                out.append({"kind": "tool_error", "tool": ev.get("tool"),
+                            "error": ev.get("error", "")})
+        return out
+
+    done = False
+    error_payload: str | None = None
+    while not done:
+        # 1. Drain any tool events first so live cards land ASAP.
+        for ev in _flush_events():
+            yield ev
+
+        # 2. Pull a chunk with short timeout so we loop back to drain quickly.
+        try:
+            kind, payload = chunk_q.get(timeout=0.25)
+        except queue.Empty:
+            continue
+
+        if kind == "done":
+            done = True
+            continue
+        if kind == "error":
+            error_payload = payload
+            done = True
+            continue
+
+        # kind == "chunk" — surface per-AIMessage reasoning.
+        for node_state in (payload or {}).values():
+            if not isinstance(node_state, dict):
+                continue
+            for m in (node_state.get("messages", []) or []):
+                mid = getattr(m, "id", None) or id(m)
+                if mid in seen_msg_ids:
+                    continue
+                seen_msg_ids.add(mid)
+                if getattr(m, "type", "") != "ai":
+                    continue
+                t = _extract_thinking([m])
+                if t:
+                    streamed_turn_thinking = True
+                    yield {"kind": "turn_thinking", "text": t}
+
+    # Final drain: catch events that landed between last chunk and runner exit.
+    for ev in _flush_events():
+        yield ev
+
+    if error_payload is not None:
+        log.info(f"[ask_stream] runner exception={error_payload}")
+        yield {"kind": "tool_error", "tool": "agent", "error": error_payload}
         return
 
     # Final snapshot from checkpointer.
