@@ -183,6 +183,21 @@ def slash_skill_loader(state: Any, runtime: Any) -> dict | None:
     if any(getattr(m, "type", "") in ("ai", "tool") for m in messages):
         return None
 
+    # Skip if `preload_named_skill` (in classification.py) already injected
+    # the same SKILL.md body. Without this guard, `/ar-msa` lands TWO
+    # identical 50k+ char SystemMessages — `classify_intent` flags the
+    # named_skill, `preload_named_skill` injects it, and then this
+    # middleware re-injects it for the slash prefix. Doubles the prompt
+    # budget for no value.
+    _NAMED_SKILL_MARKER = "<!-- openmark-named-skill-preloaded -->"
+    for m in messages:
+        if getattr(m, "type", "") != "system":
+            continue
+        c = getattr(m, "content", "")
+        if isinstance(c, str) and _NAMED_SKILL_MARKER in c:
+            log.info("[slash] skip — named-skill preloader already injected the body")
+            return None
+
     first_human_idx = None
     first_human = None
     for i, m in enumerate(messages):

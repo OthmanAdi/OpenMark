@@ -66,6 +66,18 @@ _SLASH_TO_INTENT: dict[str, Intent] = {
     "bookmark-dive":         "dive",
     "repo-research":         "deep",
     "niche-hunter":          "deep",
+    # Humanizer skills imply a full compose loop (research -> compose ->
+    # humanize -> verify), NOT a fast lookup. The previous default of "fast"
+    # told the orchestrator "no composers" — which collided with the skill
+    # body asking for Arabic humanization, and the model resolved the
+    # conflict by generating directly without invoking task_compose_* /
+    # task_humanize / task_verify.
+    "ar-msa":                "newsletter",
+    "ar-egt":                "newsletter",
+    "ar-shami":              "newsletter",
+    "he":                    "newsletter",
+    "polisher":              "newsletter",
+    "verifier":              "newsletter",
 }
 
 _URL_RE       = re.compile(r"\bhttps?://\S+", re.IGNORECASE)
