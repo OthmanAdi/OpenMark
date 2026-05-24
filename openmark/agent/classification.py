@@ -71,9 +71,13 @@ _SLASH_TO_INTENT: dict[str, Intent] = {
 _URL_RE       = re.compile(r"\bhttps?://\S+", re.IGNORECASE)
 _DIVE_VERBS   = re.compile(r"\b(expand|dig\s+into|neighbors\s+of|related\s+to|dive\s+into)\b", re.IGNORECASE)
 _NEWSLETTER   = re.compile(r"\bnewsletter\b", re.IGNORECASE)
+# Date-range catches digest queries — adds explicit ISO dates and "all of them"
+# style asks so the orchestrator routes them via the find_all_in_range tool.
 _DIGEST       = re.compile(
     r"\b(this\s+(week|month)|last\s+(\d+\s*)?(day|week|month)s?|"
-    r"past\s+(\d+\s*)?(day|week|month)s?|weekly|monthly|yesterday|today|recap)\b",
+    r"past\s+(\d+\s*)?(day|week|month)s?|weekly|monthly|yesterday|today|recap|"
+    r"all\s+(of\s+)?them|every\s+(bookmark|save|item)|fully\s+all|"
+    r"\d{4}-\d{2}-\d{2}|on\s+\w+\s+\d{1,2})\b",
     re.IGNORECASE,
 )
 _DEEP         = re.compile(
@@ -405,8 +409,9 @@ OUTPUT
 _INTENT_HINTS: dict[str, str] = {
     "fast":       (
         "INTENT: fast. Single task_researcher call to surface 5-10 items the "
-        "user has SAVED in their KB. Skip web tools unless the KB returns "
-        "empty. No composers."
+        "user has SAVED in their KB. Tell the researcher to PREFER search_hybrid "
+        "(BM25 + vector RRF) for any literal / multi-keyword query. Skip web "
+        "tools unless the KB returns empty. No composers."
     ),
     "deep":       (
         "INTENT: deep. Multi-angle research. The task_researcher should "
@@ -422,9 +427,13 @@ _INTENT_HINTS: dict[str, str] = {
         "otherwise web + TrendRadar are equally valid anchor sources."
     ),
     "digest":     (
-        "INTENT: digest. task_researcher with time window using find_recent / "
-        "search_by_date_range on the OpenMark KB. Group by category, compact "
-        "bulleted output."
+        "INTENT: digest. task_researcher with the time window. "
+        "If the user said 'ALL OF THEM', 'fully', 'every', 'complete list', or "
+        "asked for an explicit calendar day/week/month, the researcher MUST "
+        "use `find_all_in_range` (no LIMIT, paginated). For a curated/ranked "
+        "digest ('top picks from last week'), use `find_recent` or "
+        "`search_by_date_range`. Group by category in the final response, "
+        "compact bulleted output."
     ),
     "dive":       (
         "INTENT: dive. task_researcher with the URL + graph_expand for "
