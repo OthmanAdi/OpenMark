@@ -558,14 +558,35 @@ def stats_fn():
 
 # ── Build UI ──────────────────────────────────────────────────────────────────
 
-DARK_CSS = """
-body, .gradio-container { background: #020617 !important; color: #e2e8f0 !important; }
+# Theme honors `OPENMARK_THEME` env var: `light` (default), `dark`, or `system`.
+# Light default per user feedback 2026-05-24 — Windows light system theme was
+# clashing with the prior forced-dark CSS. To get the prior dark feel, set
+# OPENMARK_THEME=dark in .env or pass ?__theme=dark in the URL (Gradio honors
+# that query param regardless of theme= constructor arg).
+OPENMARK_THEME = (os.getenv("OPENMARK_THEME") or "light").strip().lower()
+if OPENMARK_THEME not in ("light", "dark", "system"):
+    OPENMARK_THEME = "light"
+
+# Shared CSS: layout fixes + button accents. NO body bg override here — let
+# Gradio's theme own the page background so light/dark switch cleanly.
+BASE_CSS = """
 .gr-button-primary { background: #6366f1 !important; border: none !important; }
 .gr-button-primary:hover { background: #4f46e5 !important; }
 footer { display: none !important; }
 #search-list { overflow-y: auto; max-height: 680px; }
 #search-graph iframe { border-radius: 12px; }
 """
+
+# Dark-only override applied when OPENMARK_THEME=dark.
+DARK_OVERRIDE_CSS = """
+body, .gradio-container { background: #020617 !important; color: #e2e8f0 !important; }
+"""
+
+if OPENMARK_THEME == "dark":
+    BASE_CSS = BASE_CSS + DARK_OVERRIDE_CSS
+
+# Kept as alias so the existing `css=DARK_CSS` reference at launch keeps working.
+DARK_CSS = BASE_CSS
 
 
 
@@ -1445,12 +1466,17 @@ def build_ui():
 
 if __name__ == "__main__":
     ui = build_ui()
+    # Theme selection: Soft = Gradio's light theme; Base = original mostly-neutral.
+    # When the user wants dark, we still use Soft as the base but layer the
+    # DARK_OVERRIDE_CSS on top — Soft's accents look better than Base's even
+    # in dark mode.
+    _selected_theme = gr.themes.Soft(primary_hue="indigo", neutral_hue="slate")
     ui.launch(
         server_name="127.0.0.1",
         server_port=int(os.getenv("OPENMARK_PORT", "7860")),
         share=False,
         inbrowser=True,
-        theme=gr.themes.Base(primary_hue="indigo", neutral_hue="slate"),
+        theme=_selected_theme,
         css=DARK_CSS,
         # Allow Gradio to serve files from drafts/ so the auto-saved reports
         # are downloadable via /gradio_api/file=drafts/*.md links.
