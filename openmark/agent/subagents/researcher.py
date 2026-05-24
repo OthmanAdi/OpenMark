@@ -17,6 +17,7 @@ from openmark.agent.subagents._common import (
 )
 from openmark.agent.tools import (
     explore_tag_cluster,
+    find_all_in_range,
     find_by_domain,
     find_by_source,
     find_by_tag,
@@ -41,7 +42,7 @@ from openmark.agent.tools import (
 
 
 RESEARCHER_TOOLS = [
-    # OpenMark graph retrieval (15)
+    # OpenMark graph retrieval (16)
     search_semantic,
     search_by_category,
     search_by_community,
@@ -54,6 +55,7 @@ RESEARCHER_TOOLS = [
     search_youtube,
     find_recent,
     search_by_date_range,
+    find_all_in_range,     # NEW: full-recall, no-cap date window for "ALL OF THEM" queries
     get_bookmark_full,
     get_stats,
     run_cypher,            # read-only enforced inside the tool
@@ -75,10 +77,11 @@ SOURCE SELECTION (read this carefully — wrong source = wasted turn)
 
 You have THREE retrieval surfaces:
 
-  A. OpenMark KB (Neo4j Graph RAG): search_semantic, search_by_category,
-     search_by_community, find_by_tag, find_by_source, search_linkedin,
-     search_youtube, find_recent, search_by_date_range, get_bookmark_full,
-     graph_expand, explore_tag_cluster, run_cypher.
+  A. OpenMark KB (Neo4j Graph RAG): search_hybrid (PREFERRED), search_semantic,
+     search_by_category, search_by_community, find_by_tag, find_by_source,
+     search_linkedin, search_youtube, find_recent, search_by_date_range,
+     find_all_in_range, get_bookmark_full, graph_expand, explore_tag_cluster,
+     run_cypher.
      -> Use when the brief references the user's SAVED content:
         "my bookmarks", "my saves", "what I read", "what I bookmarked",
         explicit URLs the user owns, weekly/monthly digests of saves.
@@ -103,6 +106,24 @@ call AND one web call, then steer by what came back.
 If a tool errors (e.g. Neo4j down -> "Couldn't connect to 127.0.0.1:7687"),
 skip that surface for the rest of the turn and lean on the others. NEVER
 retry the same dead tool.
+
+TOOL CHOICE — OpenMark KB
+- `search_hybrid` is the DEFAULT for OpenMark queries. It fuses BM25 over
+  title + doc_text with pplx-embed cosine ANN via Reciprocal Rank Fusion.
+  Catches exact terms ("muapi", "shai-hulud", "Hermes adapter") that pure
+  vector search drops. Always prefer it over `search_semantic` unless the
+  query is purely conceptual/paraphrased.
+- `find_all_in_range(from_iso, to_iso?, page?)` returns EVERY bookmark in a
+  date window with NO LIMIT and NO ranking. Use whenever the user asks for
+  "all bookmarks from <date>", "everything I saved on/between X", or any
+  phrasing demanding full recall. Paginate via `page` if the first call says
+  more remain. This tool is the answer to "FULLY ALL OF THEM" style asks.
+  Do NOT use `search_by_date_range` for those — it caps at n=30.
+- `search_by_date_range` is for time-bounded SEMANTIC ranking ("the most
+  relevant LangChain posts from May"). It does NOT return everything.
+- For older nodes without `created_at` (older than the backfill window),
+  the date tools won't see them — say so in `notes` if a date query
+  returns thin results.
 
 WORKFLOW
 1. Parse the brief. Identify topic, time window, format hint, URLs.

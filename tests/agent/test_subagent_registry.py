@@ -51,6 +51,7 @@ def test_researcher_has_full_retrieval_slice():
         "search_youtube",
         "find_recent",
         "search_by_date_range",
+        "find_all_in_range",
         "get_bookmark_full",
         "get_stats",
         "run_cypher",
@@ -63,7 +64,7 @@ def test_researcher_has_full_retrieval_slice():
     }
     missing = must_have - tool_names
     assert not missing, f"researcher missing: {missing}"
-    assert len(RESEARCHER_TOOLS) == 21
+    assert len(RESEARCHER_TOOLS) == 22
 
 
 def test_composer_format_to_tool_map_complete():

@@ -7,7 +7,7 @@ validate citations against state["seen_urls"].
 """
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone  # noqa: F401 (timedelta used in find_all_in_range)
 from functools import lru_cache
 from langchain_core.tools import tool
 from openmark.embeddings.factory import get_embedder
@@ -66,6 +66,56 @@ def _row_to_hit(r: dict) -> BookmarkHit:
 
 
 # ── Primary retrieval tools ────────────────────────────────────────────────────
+
+@tool
+def search_hybrid(query: str, n: int = 10) -> str:
+    """
+    Hybrid BM25 + vector retrieval (fused via Reciprocal Rank Fusion).
+    PREFER THIS for short / literal / multi-keyword queries — it catches
+    exact terms ("muapi", "shai-hulud", "Hermes adapter", "OpenMark") that
+    pure semantic search misses, while still ranking semantic matches.
+    For pure topic / paraphrased queries, `search_semantic` is roughly
+    equivalent. When in doubt, prefer `search_hybrid`.
+
+    Returns up to n hits ranked by relative fusion score in [0, 1].
+    TRUST these hits — even when their relevance looks unusual, they
+    matched at least one of BM25 (exact-keyword) or vector (semantic).
+    A score of 1.0 means it was the top hit of the fusion; 0.5 means
+    it was roughly half as strongly ranked as the top hit. The fusion
+    note tells you whether each hit came from BM25, vector, or both.
+    """
+    try:
+        q_embed = _embed_query(query)
+        # Pull a deeper pool when reranking so the cross-encoder has room to
+        # reorder. When rerank is off, the larger pool is sliced to n cheaply.
+        from openmark.agent import rerank
+        pool = 50 if rerank.is_enabled() else n
+        rows = neo4j_store.hybrid_search(query, q_embed, n=pool)
+        rows = rerank.rerank_rows(query, rows, top_k=n)
+        # Normalize RRF scores to [0, 1] max-relative. The raw RRF values
+        # (around 0.016 for a single-source top rank) get read as "low
+        # similarity" by downstream LLMs and they discard real matches.
+        # Scaling to "1.0 = top hit" surfaces relative ranking honestly.
+        if rows:
+            top = max((r.get("similarity") or 0) for r in rows)
+            if top > 0:
+                for r in rows:
+                    r["similarity"] = (r.get("similarity") or 0) / top
+        hits = [_row_to_hit(r) for r in rows]
+        # Annotate which fusion sources contributed (bm25, vec, both)
+        note = ""
+        if rows:
+            both = sum(1 for r in rows if set(r.get("fusion_sources") or []) == {"bm25", "vec"})
+            note = f"fusion: {both}/{len(rows)} hits matched BOTH BM25 and vector. Scores are relative (1.0 = top hit). TRUST the hits — even single-source matches are real."
+            if rerank.is_enabled() and any(r.get("rerank_score") is not None for r in rows):
+                note += " (reranked)"
+        return ToolResult(
+            hits=hits, strategy="semantic",
+            query_echo=query, total_found=len(hits), note=note,
+        ).to_compact_markdown()
+    except Exception as e:
+        return ToolResult(strategy="semantic", query_echo=query, note=f"ERROR: {e}").to_compact_markdown()
+
 
 @tool
 def search_semantic(query: str, n: int = 10) -> str:
@@ -376,6 +426,126 @@ def search_by_date_range(from_iso: str, to_iso: str, query: str = "", n: int = 3
 
 
 @tool
+def find_all_in_range(
+    from_iso: str,
+    to_iso: str = "",
+    page: int = 0,
+    page_size: int = 200,
+) -> str:
+    """
+    Return EVERY bookmark with created_at in the half-open window
+    [from_iso, to_iso). NO semantic ranking, NO LIMIT, NO similarity cap.
+
+    Use this when the user asks for "all bookmarks from <date>",
+    "everything I saved on/between X", or any phrasing that needs FULL
+    recall over a date window. Pagination via `page` (0-indexed) and
+    `page_size` (max 500). The total count is returned so the caller
+    knows when to fetch more pages.
+
+    DATE BOUNDARY SEMANTICS:
+      - `from_iso` is INCLUSIVE.
+      - `to_iso` is end-of-day INCLUSIVE when you pass a date-only string —
+        i.e. `find_all_in_range("2026-05-24", "2026-05-24")` returns all of
+        May 24. (Internally we advance date-only to_iso to next midnight.)
+      - With a full timestamp `T...` in to_iso, the bound is exclusive — use
+        this when you need precise sub-day windows.
+      - Omitted to_iso defaults to NOW.
+
+    Examples:
+        find_all_in_range("2026-05-24")                     -> all from May 24, 00:00 to right now
+        find_all_in_range("2026-05-24", "2026-05-24")       -> all of May 24 (inclusive)
+        find_all_in_range("2026-05-01", "2026-05-31")       -> all of May 2026 (inclusive)
+        find_all_in_range("2026-05-24T00:00:00Z", "2026-05-25T00:00:00Z")  -> a single calendar day (exclusive upper)
+        find_all_in_range("2026-05-24", page=1, page_size=100)  -> second page of 100
+
+    NOT all nodes have a `created_at` yet — sources without timestamps
+    (Raindrop without API re-pull, YouTube without published_at backfill)
+    are invisible here. The tool surfaces that fact in `note` when results
+    look thin.
+    """
+    try:
+        # Normalize: treat date-only inputs as midnight UTC.
+        if from_iso and "T" not in from_iso:
+            from_iso = from_iso + "T00:00:00Z"
+        if not to_iso:
+            to_iso = datetime.now(timezone.utc).isoformat()
+        elif "T" not in to_iso:
+            # Date-only `to_iso` means INCLUSIVE of that day: advance to next
+            # midnight so "find_all_in_range('2026-05-24', '2026-05-24')"
+            # actually returns all of May 24 instead of an empty window.
+            try:
+                y, m, d = (int(x) for x in to_iso.split("-")[:3])
+                to_dt = datetime(y, m, d, tzinfo=timezone.utc) + timedelta(days=1)
+                to_iso = to_dt.isoformat()
+            except (ValueError, TypeError):
+                to_iso = to_iso + "T00:00:00Z"
+
+        page_size = max(1, min(int(page_size), 500))
+        skip = max(0, int(page)) * page_size
+
+        # Total count first — cheap with the range index on b.created_at
+        count_rows = neo4j_store.query(
+            """
+            MATCH (b:Bookmark)
+            WHERE b.created_at IS NOT NULL
+              AND b.created_at >= datetime($from_iso)
+              AND b.created_at <  datetime($to_iso)
+            RETURN count(b) AS n
+            """,
+            {"from_iso": from_iso, "to_iso": to_iso},
+        )
+        total = (count_rows[0]["n"] if count_rows else 0) or 0
+
+        rows = neo4j_store.query(
+            """
+            MATCH (b:Bookmark)
+            WHERE b.created_at IS NOT NULL
+              AND b.created_at >= datetime($from_iso)
+              AND b.created_at <  datetime($to_iso)
+            OPTIONAL MATCH (b)-[:TAGGED]->(t:Tag)
+            WITH b, collect(t.name)[..6] AS tags
+            RETURN b.url AS url, b.title AS title, b.score AS bm_score,
+                   b.source AS source, b.category AS category,
+                   toString(b.created_at) AS created_at, tags
+            ORDER BY b.created_at DESC
+            SKIP $skip LIMIT $page_size
+            """,
+            {"from_iso": from_iso, "to_iso": to_iso,
+             "skip": skip, "page_size": page_size},
+        )
+
+        hits = [_row_to_hit(r) for r in rows]
+        more_pages = (skip + page_size) < total
+        note_bits = []
+        if total == 0:
+            note_bits.append(
+                "Zero matches. Many older nodes have no created_at — "
+                "try search_semantic for time-blind retrieval, or widen the window."
+            )
+        if more_pages:
+            next_skip = skip + page_size
+            note_bits.append(
+                f"{total - next_skip} more bookmarks remain in this window. "
+                f"Call again with page={page + 1}, page_size={page_size}."
+            )
+        else:
+            note_bits.append(f"Returned page {page + 1} of {(total // page_size) + (1 if total % page_size else 0)} (window total: {total}).")
+
+        return ToolResult(
+            hits=hits, strategy="source",
+            query_echo=f"{from_iso}..{to_iso} page={page} size={page_size}",
+            total_found=total,
+            note=" ".join(note_bits),
+        ).to_compact_markdown()
+    except Exception as e:
+        return ToolResult(
+            strategy="source",
+            query_echo=f"{from_iso}..{to_iso}",
+            note=f"ERROR: {e}",
+        ).to_compact_markdown()
+
+
+@tool
 def get_bookmark_full(url: str) -> str:
     """
     Full record for one bookmark: title, category, tags, source, score,
@@ -660,6 +830,7 @@ def reddit_search(query: str, subreddit: str = "", n: int = 15) -> str:
 
 
 ALL_TOOLS = [
+    search_hybrid,
     search_semantic,
     search_by_category,
     search_by_community,
@@ -672,6 +843,7 @@ ALL_TOOLS = [
     search_youtube,
     find_recent,
     search_by_date_range,
+    find_all_in_range,
     get_bookmark_full,
     get_stats,
     run_cypher,
