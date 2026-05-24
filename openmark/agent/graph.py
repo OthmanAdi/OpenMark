@@ -43,6 +43,7 @@ from langchain.agents.middleware import (
 
 from openmark.agent.classification import (
     OrchestratorState,
+    classify_complexity,
     classify_intent,
     dynamic_orchestrator_prompt,
     preload_named_skill,
@@ -113,10 +114,15 @@ def build_agent():
         #    (e.g. "use the niche skill", "polish this", "humanize in ar-egt")
         #    and stores the matched short_name in state.
         classify_intent,
+        # 1b. Classify complexity (simple vs multi-step). Gates the TodoList
+        #     prompt directive — simple turns get a "no write_todos" hint to
+        #     prevent the orchestrator from stacking todo-list theatre cards.
+        classify_complexity,
         # 2. If a skill was named in plain English, pre-load its SKILL.md
         #    body as a SystemMessage so the orchestrator MUST follow it.
         preload_named_skill,
-        # 3. Dynamic prompt — reads intent + named_skill, injects matching system prompt.
+        # 3. Dynamic prompt — reads intent + named_skill + complex, injects
+        #    the matching system prompt.
         dynamic_orchestrator_prompt,
         # 3. Trim bulky tool outputs (sub-agent results can be large).
         ContextEditingMiddleware(

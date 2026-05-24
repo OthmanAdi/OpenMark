@@ -43,12 +43,32 @@ class IntentLabel(BaseModel):
     )
 
 
+class ComplexityLabel(BaseModel):
+    """Structured output for the complexity classifier.
+
+    Used to decide whether the orchestrator should plan with write_todos +
+    fan out to multiple sub-agents (complex) or answer directly with at most
+    one sub-agent (simple). Simple = no todo-list theater in the UI.
+    """
+
+    complex: bool = Field(
+        description=(
+            "True ONLY if the request needs multi-step orchestration: "
+            "research + compose + humanize + verify chain, multi-angle research "
+            "with several tool calls, or explicit user phrasing like 'step by step', "
+            "'first... then', 'compare X vs Y'. False for direct lookups, single "
+            "questions, follow-ups that just need one tool, or short answers."
+        )
+    )
+
+
 class OrchestratorState(AgentState):
     """AgentState extension carrying the classified intent label."""
 
     intent: str | None
     intent_source: str | None
     named_skill: str | None      # short_name of a skill the user named explicitly
+    complex: bool | None         # set by classify_complexity; gates TodoListMiddleware prompt
 
 
 # ── Slash + heuristic helpers ───────────────────────────────────────────────
@@ -246,6 +266,105 @@ def _llm_classify(text: str) -> Intent | None:
         return None
 
 
+# ── Complexity classifier ───────────────────────────────────────────────────
+# Decides whether the orchestrator should plan multi-step with write_todos +
+# fan out to sub-agents, OR just answer directly. Cuts todo-list theater on
+# simple lookups where the model would otherwise mark 5 todos "completed" in
+# a row without doing the work.
+
+_COMPLEXITY_LLM = None
+
+# Map intent -> complexity (deterministic; LLM only used when intent is fast/None)
+_INTENT_TO_COMPLEX: dict[str, bool] = {
+    "newsletter": True,
+    "deep":       True,
+    "digest":     True,
+    "dive":       False,
+    "fast":       False,
+}
+
+# Phrases that bump a fast/None intent into complex
+_COMPLEX_HINTS = re.compile(
+    r"\b(step\s*by\s*step|first[\s,]+.*then|and\s+then|after\s+that|"
+    r"compare\s+\w+\s+(vs|with|to|against)|plan\s+out|break\s+down|"
+    r"each\s+of|all\s+of\s+the|every\s+single)\b",
+    re.IGNORECASE,
+)
+# Phrases that confidently mark a request as simple
+_SIMPLE_HINTS = re.compile(
+    r"\b(quick(ly)?|just|simply|one\s+line|brief(ly)?|short\s+answer|"
+    r"yes\s*or\s*no|tldr|tl;dr)\b",
+    re.IGNORECASE,
+)
+
+
+def _heuristic_complexity(intent: str | None, text: str) -> bool | None:
+    """Returns True/False if intent gives a confident answer, else None."""
+    if not text or not text.strip():
+        return False
+    if _COMPLEX_HINTS.search(text):
+        return True
+    if _SIMPLE_HINTS.search(text) and (intent in (None, "fast", "dive")):
+        return False
+    if intent in _INTENT_TO_COMPLEX:
+        return _INTENT_TO_COMPLEX[intent]
+    return None
+
+
+def _get_complexity_llm():
+    """Build (and cache) the structured-output complexity classifier.
+
+    Defaults to the same cheap classifier model the intent classifier uses,
+    but the OPENMARK_MODEL_COMPLEXITY env var can pin a specific Foundry
+    deployment (e.g. gpt-4o-mini) when stable fast classification matters.
+    """
+    global _COMPLEXITY_LLM
+    if _COMPLEXITY_LLM is not None:
+        return _COMPLEXITY_LLM
+    import os
+    from openmark.agent.llms import _azure_chat, _azure_codex, _azure_grok, _is_grok, _is_reasoning_model, _is_local, _local_chat
+    deployment = os.getenv("OPENMARK_MODEL_COMPLEXITY", "").strip()
+    if _is_local():
+        llm = _local_chat(temperature=0.0, streaming=False)
+    elif deployment:
+        if _is_grok(deployment):
+            llm = _azure_grok(deployment, streaming=False, effort="low")
+        elif _is_reasoning_model(deployment):
+            llm = _azure_codex(deployment, streaming=False, effort="low", verbosity="low")
+        else:
+            llm = _azure_chat(deployment, streaming=False, temperature=0.0)
+    else:
+        # Fall through to the cheap classifier tier (gpt-5-mini by default).
+        llm = build_classifier()
+    _COMPLEXITY_LLM = llm.with_structured_output(ComplexityLabel)
+    return _COMPLEXITY_LLM
+
+
+def _llm_classify_complexity(text: str) -> bool:
+    """Cheap LLM fallback. Returns False on any failure (simple by default)."""
+    if not text or not text.strip():
+        return False
+    prompt = (
+        "Decide if this user request needs MULTI-STEP orchestration with "
+        "research + composing + verifying, or just a SIMPLE direct answer.\n\n"
+        "complex=True examples: 'write a newsletter on X', 'compare A vs B then "
+        "draft a post', 'find everything I saved this week and humanize it', "
+        "'plan out my research', 'first do X then Y'.\n\n"
+        "complex=False examples: 'what is X', 'show me 5 saves about X', "
+        "'find my bookmarks on X', 'do you have hashtags for that draft', "
+        "'what is my favorite color'.\n\n"
+        f"Request: {text.strip()}\n\nAnswer (complex true/false):"
+    )
+    try:
+        t0 = time.time()
+        out = _get_complexity_llm().invoke(prompt)
+        log.info(f"[classify-complex] complex={out.complex!r} in {int((time.time()-t0)*1000)}ms")
+        return bool(out.complex)
+    except Exception as e:
+        log.info(f"[classify-complex] failed: {e!r}; defaulting simple")
+        return False
+
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 
@@ -305,6 +424,40 @@ def classify_intent(state: OrchestratorState, runtime: Any) -> dict | None:
     # 3) LLM
     label = _llm_classify(msg) or "fast"
     return {"intent": label, "intent_source": "llm"}
+
+
+# ── before_model: complexity classifier ─────────────────────────────────────
+
+
+@before_model(state_schema=OrchestratorState)
+def classify_complexity(state: OrchestratorState, runtime: Any) -> dict | None:
+    """
+    Set state.complex=True/False on the first turn. Sticky thereafter.
+
+    Resolution order:
+      0. If intent says newsletter/deep/digest -> complex=True (no LLM call).
+      1. If user text has "simple" / "quick" / "tldr" hints with fast intent
+         -> complex=False (no LLM call).
+      2. If intent is dive/fast and no complexity hints -> complex=False.
+      3. Otherwise fall back to the cheap structured-output LLM classifier.
+
+    Effect: when complex=False, dynamic_orchestrator_prompt tells the model
+    to answer directly with at most ONE task_* call and to NOT use write_todos.
+    The TodoListMiddleware stays mounted (write_todos remains a tool the
+    model CAN call), but the prompt biases against using it on simple turns.
+    """
+    if state.get("complex") is not None:
+        return None
+    msg = _last_human_text(state.get("messages") or [])
+    if not msg.strip():
+        return None
+    intent = state.get("intent")
+    h = _heuristic_complexity(intent, msg)
+    if h is not None:
+        log.info(f"[classify-complex] heuristic -> complex={h} (intent={intent})")
+        return {"complex": h}
+    label = _llm_classify_complexity(msg)
+    return {"complex": label}
 
 
 # ── before_model: skill body pre-loader ─────────────────────────────────────
@@ -460,6 +613,7 @@ _INTENT_HINTS: dict[str, str] = {
 def dynamic_orchestrator_prompt(request: ModelRequest) -> str:
     intent = request.state.get("intent") or "fast"
     named = request.state.get("named_skill")
+    complex_flag = request.state.get("complex")
     try:
         from openmark.stores import neo4j_store
         s = neo4j_store.get_stats()
@@ -474,6 +628,27 @@ def dynamic_orchestrator_prompt(request: ModelRequest) -> str:
     )
     hint = _INTENT_HINTS.get(intent, _INTENT_HINTS["fast"])
     out = base + "\n\n" + hint
+
+    # Complexity gate: keep simple requests clean — no write_todos theatre.
+    # When complex=True, encourage planning. When complex=False, forbid
+    # write_todos so the UI doesn't get a stack of "marked completed" cards.
+    if complex_flag is True:
+        out += (
+            "\n\nCOMPLEXITY: complex. Use write_todos ONCE up front to plan, "
+            "then EVERY 'in_progress -> completed' transition in write_todos "
+            "MUST correspond to an actual sub-agent invocation that just "
+            "returned. Do NOT batch-update todos to claim completion without "
+            "the matching task_* tool call. The verifier sub-agent is part of "
+            "the contract — call task_verify after every composer."
+        )
+    elif complex_flag is False:
+        out += (
+            "\n\nCOMPLEXITY: simple. Answer directly. Use AT MOST ONE task_* "
+            "sub-agent call. DO NOT call write_todos — it's only for genuinely "
+            "multi-step orchestration. A single task_researcher + your reply "
+            "is enough for simple lookups."
+        )
+
     if named:
         out += (
             f"\n\nNAMED SKILL ACTIVE: '{named}'. The full SKILL.md body has "
