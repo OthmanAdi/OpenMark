@@ -41,12 +41,13 @@ def fetch_raindrops_for_collection(collection_id: int, title: str) -> list[dict]
             break
         for item in batch:
             items.append({
-                "url":      item.get("link", ""),
-                "title":    item.get("title", ""),
-                "excerpt":  item.get("excerpt", "")[:200],
-                "tags":     item.get("tags", [])[:5],
-                "folder":   title,
-                "source":   "raindrop",
+                "url":        item.get("link", ""),
+                "title":      item.get("title", ""),
+                "excerpt":    item.get("excerpt", "")[:200],
+                "tags":       item.get("tags", [])[:5],
+                "folder":     title,
+                "source":     "raindrop",
+                "created_at": item.get("created"),
             })
         if len(batch) < 50:
             break

@@ -39,7 +39,7 @@ def get_driver():
 
 
 def setup_schema(driver):
-    """Constraints + vector index. Safe to re-run (all IF NOT EXISTS)."""
+    """Constraints + vector index + range/fulltext indexes. Safe to re-run (all IF NOT EXISTS)."""
     constraints = [
         "CREATE CONSTRAINT bookmark_url IF NOT EXISTS FOR (b:Bookmark) REQUIRE b.url IS UNIQUE",
         "CREATE CONSTRAINT tag_name     IF NOT EXISTS FOR (t:Tag)      REQUIRE t.name IS UNIQUE",
@@ -55,6 +55,19 @@ def setup_schema(driver):
             `vector.similarity_function`: 'cosine'
         }}}}
     """
+    # Range index on created_at unlocks O(log n) date filtering and the
+    # find_all_in_range tool (otherwise that tool does a full Bookmark scan).
+    range_index = (
+        "CREATE RANGE INDEX bookmark_created_at IF NOT EXISTS "
+        "FOR (b:Bookmark) ON (b.created_at)"
+    )
+    # Full-text index on title + doc_text powers BM25, fused with vector ANN
+    # via Reciprocal Rank Fusion in hybrid_search().
+    fulltext_index = (
+        "CREATE FULLTEXT INDEX bookmark_title_ft IF NOT EXISTS "
+        "FOR (b:Bookmark) ON EACH [b.title, b.doc_text] "
+        "OPTIONS { indexConfig: { `fulltext.analyzer`: 'english' } }"
+    )
     with driver.session(database=config.NEO4J_DATABASE) as session:
         for cypher in constraints:
             try:
@@ -63,9 +76,19 @@ def setup_schema(driver):
                 print(f"  Constraint skip: {e}")
         try:
             session.run(vector_index)
-            print("  Vector index ready (bookmark_embedding, 1024-dim cosine)")
+            print(f"  Vector index ready (bookmark_embedding, {config.pplx_dimension()}-dim cosine)")
         except Exception as e:
             print(f"  Vector index skip: {e}")
+        try:
+            session.run(range_index)
+            print("  Range index ready (bookmark_created_at)")
+        except Exception as e:
+            print(f"  Range index skip: {e}")
+        try:
+            session.run(fulltext_index)
+            print("  Full-text index ready (bookmark_title_ft on title + doc_text)")
+        except Exception as e:
+            print(f"  Full-text index skip: {e}")
     print("Schema ready.")
 
 
@@ -121,23 +144,43 @@ def _write_batch(tx, batch: list[dict], embeddings: list | None):
         source   = item["source"]
         domain   = extract_domain(url)
         embed    = embeddings[i] if embeddings else None
+        doc_text = item.get("doc_text") or ""
+        # created_at is ISO 8601 string from normalize.parse_created_at; cast
+        # via Neo4j datetime() so range comparisons work in Cypher. None means
+        # "leave unchanged" (don't overwrite a prior backfill).
+        created_at_iso = item.get("created_at")
 
-        # Bookmark node — denormalize source+category for fast WHERE filtering
+        # Bookmark node — denormalize source+category for fast WHERE filtering.
+        # Persisting doc_text is load-bearing for hybrid BM25 + reranker (both
+        # need the rich text, not just the title).
+        params = {
+            "url": url, "title": title, "score": score,
+            "source": source, "category": category,
+            "doc_text": doc_text,
+            "created_at": created_at_iso,
+        }
         if embed is not None:
+            params["embedding"] = embed
             tx.run("""
                 MERGE (b:Bookmark {url: $url})
                 SET b.title = $title, b.score = $score,
                     b.source = $source, b.category = $category,
+                    b.doc_text = $doc_text,
                     b.embedding = $embedding
-            """, url=url, title=title, score=score,
-                 source=source, category=category, embedding=embed)
+                FOREACH (_ IN CASE WHEN $created_at IS NULL THEN [] ELSE [1] END |
+                    SET b.created_at = datetime($created_at)
+                )
+            """, **params)
         else:
             tx.run("""
                 MERGE (b:Bookmark {url: $url})
                 SET b.title = $title, b.score = $score,
-                    b.source = $source, b.category = $category
-            """, url=url, title=title, score=score,
-                 source=source, category=category)
+                    b.source = $source, b.category = $category,
+                    b.doc_text = $doc_text
+                FOREACH (_ IN CASE WHEN $created_at IS NULL THEN [] ELSE [1] END |
+                    SET b.created_at = datetime($created_at)
+                )
+            """, **params)
 
         # Category node + edge
         tx.run("""
@@ -328,6 +371,94 @@ def vector_search(
                tags, similar_urls, community_id
         ORDER BY similarity DESC
     """
+    return query(cypher, params)
+
+
+_LUCENE_RESERVED_RE = re.compile(r'([+\-!(){}\[\]^"~*?:\\/]|&&|\|\|)')
+
+
+def _lucene_escape(query: str) -> str:
+    """Escape Lucene reserved characters so a raw user query is safe to pass
+    to db.index.fulltext.queryNodes. Multi-char operators (&&, ||) get
+    escaped per-char which is what Lucene 8+ expects.
+
+    Without this, a query like 'C++ vs Rust' would 400 with a parse error.
+    """
+    return _LUCENE_RESERVED_RE.sub(r'\\\1', query or "").strip()
+
+
+def hybrid_search(
+    query_text: str,
+    query_embedding: list[float],
+    n: int = 10,
+    k_rrf: int = 60,
+    ann_pool: int = 100,
+    bm25_pool: int = 100,
+) -> list[dict]:
+    """
+    Hybrid retrieval: BM25 (full-text) over title + doc_text fused with
+    pplx-embed cosine ANN via Reciprocal Rank Fusion. RRF score is
+    1/(k + rank), summed across both rankings. Standard k = 60.
+
+    BM25 catches exact-keyword queries the vector ANN drops ('muapi',
+    'shai-hulud', 'Hermes adapter'). Vector still ranks topic queries.
+    Fusion is additive: a result in only one list still ranks; a result
+    in both ranks higher.
+
+    Returns the same row shape as vector_search() so the agent-side
+    BookmarkHit mapper works unchanged.
+    """
+    safe_text = _lucene_escape(query_text)
+    if not safe_text:
+        # Fall back to pure vector search if the query is empty after escape
+        return vector_search(query_embedding, n=n)
+
+    cypher = """
+        CALL () {
+            CALL db.index.fulltext.queryNodes('bookmark_title_ft', $q_text)
+            YIELD node AS b, score AS s
+            WITH b ORDER BY s DESC LIMIT $bm25_pool
+            WITH collect(b) AS rows
+            UNWIND range(0, size(rows) - 1) AS i
+            RETURN rows[i] AS b, 1.0 / ($k_rrf + i + 1) AS rrf, 'bm25' AS src
+          UNION ALL
+            MATCH (b)
+              SEARCH b IN (
+                VECTOR INDEX bookmark_embedding
+                FOR $embedding
+                LIMIT $ann_pool
+              ) SCORE AS sim
+            WITH b, sim ORDER BY sim DESC
+            WITH collect(b) AS rows
+            UNWIND range(0, size(rows) - 1) AS i
+            RETURN rows[i] AS b, 1.0 / ($k_rrf + i + 1) AS rrf, 'vec' AS src
+        }
+        WITH b, sum(rrf) AS rrf,
+             collect(DISTINCT src) AS sources
+        OPTIONAL MATCH (b)-[:TAGGED]->(t:Tag)
+        OPTIONAL MATCH (b)-[:SIMILAR_TO]->(s:Bookmark)
+        WITH b, rrf, sources,
+             collect(DISTINCT t.name)[..10] AS tags,
+             collect(DISTINCT s.url)[..3]  AS similar_urls
+        RETURN b.url      AS url,
+               b.title    AS title,
+               b.score    AS bm_score,
+               b.source   AS source,
+               b.category AS category,
+               b.doc_text AS doc_text,
+               rrf         AS similarity,
+               sources     AS fusion_sources,
+               tags, similar_urls
+        ORDER BY rrf DESC LIMIT $n
+    """
+    params = {
+        "q_text": safe_text,
+        "embedding": query_embedding,
+        "k_rrf": k_rrf,
+        "ann_pool": ann_pool,
+        "bm25_pool": bm25_pool,
+        "n": n,
+    }
     return query(cypher, params)
 
 

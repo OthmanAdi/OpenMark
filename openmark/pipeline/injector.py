@@ -116,8 +116,12 @@ def urls_to_items(urls: list[str], fetch_titles: bool = True) -> list[dict]:
 
 
 def parse_html_file(path: str) -> list[dict]:
-    """Parse Edge/Chrome HTML bookmark export."""
-    # Reuse the existing parser
+    """Parse Edge/Chrome HTML bookmark export.
+
+    Captures the Netscape-format `ADD_DATE` (unix-seconds) on every `<A>` tag.
+    normalize_item turns it into ISO 8601 and the store writes it as
+    Bookmark.created_at — the killer-query date-range tool depends on this.
+    """
     from html.parser import HTMLParser
 
     class BookmarkParser(HTMLParser):
@@ -127,6 +131,7 @@ def parse_html_file(path: str) -> list[dict]:
             self._current_folder = "Manual Add"
             self._in_a = False
             self._current_url = ""
+            self._current_add_date = ""
 
         def handle_starttag(self, tag, attrs):
             attrs = dict(attrs)
@@ -135,6 +140,7 @@ def parse_html_file(path: str) -> list[dict]:
             if tag == "a":
                 self._in_a = True
                 self._current_url = attrs.get("href", "")
+                self._current_add_date = attrs.get("add_date", "")
 
         def handle_endtag(self, tag):
             if tag == "a":
@@ -144,7 +150,7 @@ def parse_html_file(path: str) -> list[dict]:
             if self._in_a and self._current_url.startswith("http"):
                 data = data.strip()
                 if data:
-                    self.bookmarks.append({
+                    item = {
                         "url": self._current_url,
                         "title": data[:200],
                         "category": _guess_category(self._current_url),
@@ -152,7 +158,10 @@ def parse_html_file(path: str) -> list[dict]:
                         "score": 5,
                         "source": "edge",
                         "folder": "HTML Import",
-                    })
+                    }
+                    if self._current_add_date and self._current_add_date.isdigit():
+                        item["add_date"] = self._current_add_date
+                    self.bookmarks.append(item)
                 self._in_a = False
 
     with open(path, encoding="utf-8", errors="replace") as f:
@@ -173,13 +182,14 @@ def parse_json_file(path: str) -> list[dict]:
         for item in data:
             if isinstance(item, dict) and item.get("url"):
                 items.append({
-                    "url":      item.get("url", ""),
-                    "title":    item.get("title", item.get("url", ""))[:200],
-                    "category": item.get("category") or _guess_category(item.get("url", "")),
-                    "tags":     item.get("tags", [])[:5],
-                    "score":    item.get("score", 5),
-                    "source":   item.get("source", "json_import"),
-                    "folder":   item.get("folder", "JSON Import"),
+                    "url":        item.get("url", ""),
+                    "title":      item.get("title", item.get("url", ""))[:200],
+                    "category":   item.get("category") or _guess_category(item.get("url", "")),
+                    "tags":       item.get("tags", [])[:5],
+                    "score":      item.get("score", 5),
+                    "source":     item.get("source", "json_import"),
+                    "folder":     item.get("folder", "JSON Import"),
+                    "created_at": item.get("created_at") or item.get("created"),
                 })
         return items
 

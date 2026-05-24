@@ -75,14 +75,15 @@ def load_youtube() -> list[dict]:
     for section in ["liked_videos", "watch_later", "playlists"]:
         for v in yt.get(section, []):
             items.append({
-                "url":      v.get("url", ""),
-                "title":    v.get("title", ""),
-                "channel":  v.get("channel", ""),
-                "folder":   f"YouTube / {section}",
-                "source":   f"youtube_{section}",
-                "tags":     v.get("tags", [])[:5],
-                "category": "YouTube & Video",
-                "score":    7,
+                "url":          v.get("url", ""),
+                "title":        v.get("title", ""),
+                "channel":      v.get("channel", ""),
+                "folder":       f"YouTube / {section}",
+                "source":       f"youtube_{section}",
+                "tags":         v.get("tags", [])[:5],
+                "category":     "YouTube & Video",
+                "score":        7,
+                "published_at": v.get("published_at") or v.get("publishedAt"),
             })
     print(f"YouTube: {len(items)} videos (liked + watch_later + playlists)")
     return items
