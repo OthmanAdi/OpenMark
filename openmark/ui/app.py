@@ -1097,17 +1097,32 @@ def build_ui():
                     breaks live streaming in gradio 6 — the chained generator's
                     yields get batched and the chatbot only repaints AT THE END.
                     Keeping everything in one generator preserves per-yield SSE
-                    repaints, so the user watches tool cards land live."""
+                    repaints, so the user watches tool cards land live.
+
+                    Session-id discipline: we CREATE the session up front (if
+                    missing) so we can yield it back into session_id_state on
+                    every chunk. Without this, every turn calls chat_fn with
+                    session_id=None, chat_fn creates a fresh session row, and
+                    the agent's SqliteSaver thread_id changes turn-over-turn —
+                    so the orchestrator never sees prior tool results. This is
+                    the root cause of "the agent doesn't remember my last turn"
+                    reports.
+                    """
                     msg = (msg or "").strip()
                     if not msg:
-                        # Nothing to send — leave UI alone.
-                        yield gr.update(), history or [], _SEND_IDLE, _BADGE_OFF
+                        # Nothing to send — leave UI alone (preserve session_id).
+                        yield gr.update(), history or [], _SEND_IDLE, _BADGE_OFF, session_id
                         return
+
+                    # Create the session NOW if it doesn't exist yet, so we can
+                    # propagate the id back to gr.State on the very first yield.
+                    if not session_id:
+                        session_id = _history.create_session(title=_history.auto_title(msg))
 
                     # Stage 1 — instant repaint: clear textbox, push user msg,
                     # disable Send, show "working" badge.
                     history = (history or []) + [{"role": "user", "content": msg}]
-                    yield "", history, _SEND_BUSY, _BADGE_ON
+                    yield "", history, _SEND_BUSY, _BADGE_ON, session_id
 
                     # Stage 2 — stream the assistant response into a fresh slot.
                     history = history + [{"role": "assistant", "content": ""}]
@@ -1115,13 +1130,13 @@ def build_ui():
                     for chunk in chat_fn(user_msg, history[:-1], session_id):
                         history[-1]["content"] = chunk
                         # textbox + busy state unchanged during streaming; only
-                        # the chatbot history mutates.
-                        yield gr.update(), history, _SEND_BUSY, _BADGE_ON
+                        # the chatbot history mutates. session_id stays put.
+                        yield gr.update(), history, _SEND_BUSY, _BADGE_ON, session_id
 
                     # Stage 3 — done. Flip Send back to idle and hide the badge.
-                    yield gr.update(), history, _SEND_IDLE, _BADGE_OFF
+                    yield gr.update(), history, _SEND_IDLE, _BADGE_OFF, session_id
 
-                _send_outputs = [chat_input, chatbot, send_btn, status_badge]
+                _send_outputs = [chat_input, chatbot, send_btn, status_badge, session_id_state]
                 submit_evt = chat_input.submit(
                     _send_and_stream,
                     [chat_input, chatbot, session_id_state],
