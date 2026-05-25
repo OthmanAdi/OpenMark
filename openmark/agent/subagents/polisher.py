@@ -43,6 +43,7 @@ def _get_graph():
             model=build_polisher(),
             tools=[],
             system_prompt=PROMPT,
+            include_skills=False,                # polisher AI-tell scrub, no skill needed
             run_limit=3,
             summarization_trigger=("tokens", 20_000),
             context_edit_trigger=30_000,

@@ -40,6 +40,11 @@ def _get_graph():
             model=build_humanizer(),
             tools=[],
             system_prompt=PROMPT,
+            # KEEP include_skills=True: the humanizer's PROMPT instructs the
+            # model to CALL load_skill('<lang>') to get the per-language
+            # humanizer-* rules (humanizer-ar-msa etc.). Disabling it would
+            # leave the humanizer with no rules to apply. The skill body IS
+            # the humanizer's job description.
             run_limit=3,
             summarization_trigger=("tokens", 20_000),
             context_edit_trigger=30_000,

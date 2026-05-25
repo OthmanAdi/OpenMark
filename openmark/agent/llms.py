@@ -154,17 +154,63 @@ def _build_for_role(role: str, *, effort: str = "high", verbosity: str = "low",
 
 
 # ── Role builders ────────────────────────────────────────────────────────────
+#
+# Effort + verbosity are env-overridable per role so the .env owns the cost /
+# latency knobs. Default to "medium" everywhere so a fresh install doesn't burn
+# 11 minutes on every composer call with reasoning=high. Override with:
+#
+#   OPENMARK_EFFORT_ORCHESTRATOR=high
+#   OPENMARK_EFFORT_COMPOSER=low
+#   OPENMARK_VERBOSITY_COMPOSER=medium
+#
+# Legacy AZURE_REASONING_<TIER> env vars (executor/synthesizer/planner) remain
+# honored as a fallback so existing setups don't break.
+
+import os as _llm_os
+
+
+def _effort_for(role: str, *, default: str = "medium",
+                legacy_tier: str | None = None) -> str:
+    """Resolve reasoning effort: OPENMARK_EFFORT_<ROLE> > AZURE_REASONING_<TIER> > default."""
+    val = _llm_os.getenv(f"OPENMARK_EFFORT_{role.upper()}")
+    if val:
+        return val.strip().lower()
+    if legacy_tier:
+        legacy = _llm_os.getenv(f"AZURE_REASONING_{legacy_tier.upper()}")
+        if legacy:
+            return legacy.strip().lower()
+    return default
+
+
+def _verbosity_for(role: str, *, default: str = "medium",
+                   legacy_tier: str | None = None) -> str:
+    val = _llm_os.getenv(f"OPENMARK_VERBOSITY_{role.upper()}")
+    if val:
+        return val.strip().lower()
+    if legacy_tier:
+        legacy = _llm_os.getenv(f"AZURE_VERBOSITY_{legacy_tier.upper()}")
+        if legacy:
+            return legacy.strip().lower()
+    return default
 
 
 def build_orchestrator():
-    """Frontier reasoning model with long context. Drives the chat agent."""
-    return _build_for_role("orchestrator", effort="high", verbosity="low")
+    """Frontier reasoning model. Drives the chat agent."""
+    return _build_for_role(
+        "orchestrator",
+        effort=_effort_for("orchestrator", default="medium", legacy_tier="executor"),
+        verbosity=_verbosity_for("orchestrator", default="medium"),
+    )
 
 
 def build_classifier():
     """Cheap fast non-reasoning model for intent classification + summarization."""
-    return _build_for_role("classifier", effort="low", verbosity="low",
-                           streaming=False, temperature=0.0)
+    return _build_for_role(
+        "classifier",
+        effort=_effort_for("classifier", default="low", legacy_tier="classifier"),
+        verbosity=_verbosity_for("classifier", default="low"),
+        streaming=False, temperature=0.0,
+    )
 
 
 def build_summarizer():
@@ -174,32 +220,58 @@ def build_summarizer():
 
 def build_researcher():
     """Tool-heavy reasoning model for the researcher sub-agent."""
-    return _build_for_role("researcher", effort="high", verbosity="low")
+    return _build_for_role(
+        "researcher",
+        effort=_effort_for("researcher", default="medium", legacy_tier="executor"),
+        verbosity=_verbosity_for("researcher", default="low"),
+    )
 
 
 def build_composer():
     """Long-output reasoning model for composer sub-agents."""
-    return _build_for_role("composer", effort="high", verbosity="medium")
+    return _build_for_role(
+        "composer",
+        effort=_effort_for("composer", default="medium", legacy_tier="synthesizer"),
+        verbosity=_verbosity_for("composer", default="medium", legacy_tier="synthesizer"),
+    )
 
 
 def build_humanizer():
     """Multilingual reasoning model for Arabic / Hebrew humanizer sub-agent."""
-    return _build_for_role("humanizer", effort="medium", verbosity="medium")
+    return _build_for_role(
+        "humanizer",
+        effort=_effort_for("humanizer", default="medium", legacy_tier="synthesizer"),
+        verbosity=_verbosity_for("humanizer", default="medium"),
+    )
 
 
 def build_polisher():
     """Fast English editor model for the polisher sub-agent."""
-    return _build_for_role("polisher", effort="low", verbosity="low", temperature=0.3)
+    return _build_for_role(
+        "polisher",
+        effort=_effort_for("polisher", default="low"),
+        verbosity=_verbosity_for("polisher", default="low"),
+        temperature=0.3,
+    )
 
 
 def build_verifier():
     """Structured-output reasoning model for the verifier sub-agent."""
-    return _build_for_role("verifier", effort="medium", verbosity="low")
+    return _build_for_role(
+        "verifier",
+        effort=_effort_for("verifier", default="medium"),
+        verbosity=_verbosity_for("verifier", default="low"),
+    )
 
 
 def build_skill_author():
     """Cheap non-reasoning model for the skill-author sub-agent."""
-    return _build_for_role("skill_author", effort="low", verbosity="low", temperature=0.3)
+    return _build_for_role(
+        "skill_author",
+        effort=_effort_for("skill_author", default="low"),
+        verbosity=_verbosity_for("skill_author", default="low"),
+        temperature=0.3,
+    )
 
 
 # ── Back-compat shims ───────────────────────────────────────────────────────

@@ -61,6 +61,7 @@ def _get_graph():
             summarization_trigger=("tokens", 30_000),
             context_edit_trigger=40_000,
             context_edit_keep=4,
+            include_skills=False,                # orchestrator already preloads
         )
     return _GRAPH
 

@@ -47,6 +47,7 @@ def _get_graph():
             tools=[],
             system_prompt=PROMPT,
             response_schema=VerificationReport,
+            include_skills=False,                # verifier judges schema, no skill needed
             run_limit=3,
             summarization_trigger=("tokens", 20_000),
             context_edit_trigger=30_000,
