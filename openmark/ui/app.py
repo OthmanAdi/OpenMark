@@ -16,6 +16,7 @@ import gradio as gr
 import json as _json
 import base64 as _b64
 from openmark import config
+from openmark import agent_config as _agent_config
 from openmark import history as _history
 
 log = logging.getLogger("openmark.ui")
@@ -765,6 +766,16 @@ footer { display: none !important; }
 #om-chatbot details, #om-chatbot summary, #om-chatbot details * { opacity: 1 !important; text-shadow: none !important; }
 #om-chatbot .om-copy-btn { display: inline-flex; align-items: center; gap: 6px; background: #ffffff; color: #1e293b; border: 1px solid #cbd5e1; padding: 5px 12px; border-radius: 6px; font-size: .82em; cursor: pointer; margin: 0 0 10px 0; }
 #om-chatbot .om-copy-btn:focus-visible { outline: 2px solid #6366f1; outline-offset: 2px; }
+.om-config-hero { background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 54%, #fff7ed 100%); border: 1px solid #c7d2fe; border-radius: 18px; padding: 18px 22px; margin: 4px 0 16px; color: #111827; box-shadow: 0 18px 45px rgba(79, 70, 229, .10); }
+.om-config-hero h2 { margin: 0 0 6px; font-size: 1.35rem; letter-spacing: -.02em; color: #111827; }
+.om-config-hero p { margin: 0; color: #475569; max-width: 860px; line-height: 1.55; }
+.om-config-pill { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #cbd5e1; border-radius: 999px; padding: 3px 10px; margin: 10px 6px 0 0; color: #334155; background: rgba(255,255,255,.72); font-size: .78rem; font-weight: 700; }
+.om-config-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 14px 16px; box-shadow: 0 10px 28px rgba(15, 23, 42, .06); margin-bottom: 12px; }
+.om-config-card h3 { margin: 0 0 6px; color: #111827; font-size: 1rem; }
+.om-config-card p { margin: 0 0 10px; color: #64748b; font-size: .86rem; line-height: 1.45; }
+.om-config-status { border-radius: 12px; padding: 10px 12px; margin: 8px 0 0; font-weight: 700; }
+.om-config-ok { background: #ecfdf5; border: 1px solid #86efac; color: #166534; }
+.om-config-error { background: #fef2f2; border: 1px solid #fca5a5; color: #991b1b; white-space: pre-wrap; }
 """
 
 # Dark-only override applied when OPENMARK_THEME=dark.
@@ -782,6 +793,10 @@ body, .gradio-container { background: #020617 !important; color: #e2e8f0 !import
 #om-chatbot .om-thinking-label { color: #c4b5fd !important; }
 #om-chatbot .om-codeblock { background: #0b1220 !important; color: #cbd5e1 !important; border-color: #1e293b !important; }
 #om-chatbot .om-copy-btn { background: #1e293b; color: #cbd5e1; border-color: #334155; }
+.om-config-hero, .om-config-card { background: #0f172a; color: #e2e8f0; border-color: #334155; box-shadow: none; }
+.om-config-hero h2, .om-config-card h3 { color: #f8fafc; }
+.om-config-hero p, .om-config-card p { color: #94a3b8; }
+.om-config-pill { background: #1e293b; border-color: #334155; color: #cbd5e1; }
 """
 
 if OPENMARK_THEME == "dark":
@@ -1050,6 +1065,96 @@ var Graph = ForceGraph3D()(document.getElementById('graph'))
   </iframe>
 </div>
 """
+
+
+def _render_agent_config_tab():
+    gr.HTML("""
+    <div class="om-config-hero">
+      <h2>Agent cockpit</h2>
+      <p>Tune the chat agent from the UI. This writes only safe, non-secret agent settings to the real <code>.env</code>. API keys, cookies, database passwords, and publisher credentials stay out of this form.</p>
+      <span class="om-config-pill">Prompt safe</span>
+      <span class="om-config-pill">Model routing</span>
+      <span class="om-config-pill">Context budgets</span>
+      <span class="om-config-pill">Restart needed for compiled graph knobs</span>
+    </div>
+    """)
+
+    values = _agent_config.get_agent_config_values()
+    inputs = {}
+    open_sections = {"Prompt", "Models", "Role Models", "Reasoning"}
+
+    for section, fields in _agent_config.grouped_fields().items():
+        with gr.Accordion(section, open=section in open_sections):
+            explainer = (
+                "This is appended to the orchestrator system prompt. It applies to new chat turns after Save."
+                if section == "Prompt"
+                else "Saved to .env. Restart OpenMark after changing compiled graph, model, provider, MCP, theme, or port settings."
+            )
+            gr.HTML(f"<div class='om-config-card'><h3>{section}</h3><p>{explainer}</p></div>")
+            for field in fields:
+                value = values.get(field.key, field.default)
+                if field.type == "textarea":
+                    comp = gr.Textbox(label=field.label, value=value, info=field.help, lines=8, max_lines=18)
+                elif field.type == "select":
+                    comp = gr.Dropdown(
+                        label=field.label,
+                        choices=list(field.choices),
+                        value=value if value in field.choices else field.default,
+                        info=field.help,
+                    )
+                elif field.type == "bool":
+                    comp = gr.Checkbox(
+                        label=field.label,
+                        value=str(value).lower() in {"1", "true", "yes", "on"},
+                        info=field.help,
+                    )
+                elif field.type == "int":
+                    try:
+                        number_value = int(value)
+                    except (TypeError, ValueError):
+                        number_value = int(field.default)
+                    comp = gr.Number(
+                        label=field.label,
+                        value=number_value,
+                        precision=0,
+                        minimum=field.min_value,
+                        maximum=field.max_value,
+                        info=field.help,
+                    )
+                else:
+                    comp = gr.Textbox(label=field.label, value=value, info=field.help)
+                inputs[field.key] = comp
+
+    with gr.Row():
+        save_btn = gr.Button("Save agent config", variant="primary", scale=2)
+        reload_btn = gr.Button("Reload from .env", variant="secondary", scale=1)
+    status = gr.HTML("<div class='om-config-status om-config-ok'>Loaded current safe agent settings from .env plus defaults.</div>")
+
+    def _save_agent_config(*vals):
+        payload = {key: val for key, val in zip(inputs.keys(), vals)}
+        ok, msg = _agent_config.save_agent_config(payload)
+        klass = "om-config-ok" if ok else "om-config-error"
+        return f"<div class='om-config-status {klass}'>{_esc(msg).replace(chr(10), '<br>')}</div>"
+
+    def _reload_agent_config():
+        current = _agent_config.get_agent_config_values()
+        updates = []
+        for key in inputs:
+            field = _agent_config.FIELD_MAP[key]
+            value = current.get(key, field.default)
+            if field.type == "bool":
+                value = str(value).lower() in {"1", "true", "yes", "on"}
+            elif field.type == "int":
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    value = int(field.default)
+            updates.append(gr.update(value=value))
+        updates.append("<div class='om-config-status om-config-ok'>Reloaded from .env.</div>")
+        return updates
+
+    save_btn.click(_save_agent_config, inputs=list(inputs.values()), outputs=[status], show_progress="minimal")
+    reload_btn.click(_reload_agent_config, inputs=None, outputs=list(inputs.values()) + [status], show_progress="hidden")
 
 
 def build_ui():
@@ -1423,14 +1528,18 @@ def build_ui():
                         show_progress="hidden",
                     )
 
-            # ── Tab 3: Stats ───────────────────────────────────────────────
+            # ── Tab 3: Agent Config ────────────────────────────────────────
+            with gr.Tab("Agent Config"):
+                _render_agent_config_tab()
+
+            # ── Tab 4: Stats ───────────────────────────────────────────────
             with gr.Tab("Stats"):
                 refresh_btn  = gr.Button("Refresh", variant="secondary")
                 stats_output = gr.HTML()
                 refresh_btn.click(stats_fn, outputs=stats_output)
                 app.load(stats_fn, outputs=stats_output)
 
-            # ── Tab 4: Graph ───────────────────────────────────────────────
+            # ── Tab 5: Graph ───────────────────────────────────────────────
             with gr.Tab("Graph 3D"):
                 gr.HTML("<div style='color:#64748b;font-size:0.83em;padding:4px 0 8px'>Two modes: <b style='color:#e2e8f0'>Search</b> — visualise search results as a graph &nbsp;|&nbsp; <b style='color:#e2e8f0'>Explore</b> — browse top bookmarks by score</div>")
 
@@ -1461,7 +1570,7 @@ def build_ui():
                         )
                         graph_btn.click(graph_fn, inputs=[graph_limit], outputs=graph_output)
 
-            # ── Tab 5: Add Bookmarks ───────────────────────────────────────
+            # ── Tab 6: Add Bookmarks ───────────────────────────────────────
             with gr.Tab("+ Add"):
                 gr.HTML("""
                 <div style='color:#64748b;font-size:0.83em;padding:4px 0 10px'>
@@ -1544,7 +1653,7 @@ def build_ui():
                     show_progress="full",
                 )
 
-            # ── Tab 6: Agent Tools (inspection panel) ─────────────────────
+            # ── Tab 7: Agent Tools (inspection panel) ─────────────────────
             with gr.Tab("Agent Tools"):
                 gr.HTML("""
                 <div style='color:#64748b;font-size:0.83em;padding:4px 0 8px'>
