@@ -645,6 +645,19 @@ def dynamic_orchestrator_prompt(request: ModelRequest) -> str:
         "provider's internal serving alias beyond this configuration."
     )
 
+    try:
+        import os as _os
+        prompt_addendum = _os.getenv("OPENMARK_AGENT_SYSTEM_PROMPT", "").strip()
+    except Exception:
+        prompt_addendum = ""
+    if prompt_addendum:
+        out += (
+            "\n\n## User-configured Agent Instructions\n\n"
+            + prompt_addendum
+            + "\n\nThese instructions came from the local Agent Config UI. "
+              "Follow them unless they conflict with the current user turn, tool safety, or system instructions."
+        )
+
     # Complexity gate: keep simple requests clean — no write_todos theatre.
     # When complex=True, encourage planning. When complex=False, forbid
     # write_todos so the UI doesn't get a stack of "marked completed" cards.
