@@ -1,82 +1,129 @@
 # OpenMark Startup Script
-# Run this to start the full stack: checks Neo4j, starts UI, opens browser
-# Usage: Right-click -> Run with PowerShell
-#        Or: .\start_openmark.ps1
+# Run from PowerShell: .\start_openmark.ps1
 
-Set-Location $PSScriptRoot
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
 
-Write-Host ""
-Write-Host "  OpenMark — Personal Knowledge Graph" -ForegroundColor Cyan
-Write-Host "  ─────────────────────────────────────" -ForegroundColor DarkGray
-Write-Host ""
+$root = $PSScriptRoot
+Set-Location -LiteralPath $root
 
-# ── 1. Check Neo4j is running ──────────────────────────────────────────────
-Write-Host "  [1/3] Checking Neo4j..." -ForegroundColor Gray
-$neo4jUp = $false
-try {
-    $tcp = New-Object System.Net.Sockets.TcpClient
-    $tcp.Connect("127.0.0.1", 7687)
-    $tcp.Close()
-    $neo4jUp = $true
-    Write-Host "        Neo4j bolt://127.0.0.1:7687 — RUNNING" -ForegroundColor Green
-} catch {
-    Write-Host ""
-    Write-Host "  ⚠  Neo4j is NOT running." -ForegroundColor Yellow
-    Write-Host "     Open Neo4j Desktop → start the 'openmark' instance." -ForegroundColor Yellow
-    Write-Host "     Then run this script again." -ForegroundColor Yellow
-    Write-Host ""
-    Read-Host "  Press Enter to exit"
-    exit 1
+$port = if ($env:OPENMARK_PORT) { [int]$env:OPENMARK_PORT } else { 7860 }
+$url = "http://127.0.0.1:$port"
+$logDir = Join-Path $root "data"
+$stdoutLog = Join-Path $logDir "stdout.log"
+$stderrLog = Join-Path $logDir "stderr.log"
+
+function Write-Step($text) {
+    Write-Host "  $text" -ForegroundColor Gray
 }
 
-# ── 2. Check if UI already running ────────────────────────────────────────
-Write-Host "  [2/3] Checking for existing UI..." -ForegroundColor Gray
-$portInUse = $false
-try {
-    $resp = Invoke-WebRequest -Uri "http://127.0.0.1:7860/" -TimeoutSec 2 -ErrorAction Stop
-    $portInUse = $true
-} catch {}
+function Test-TcpPort($hostName, $portNumber) {
+    try {
+        $tcp = [System.Net.Sockets.TcpClient]::new()
+        $tcp.Connect($hostName, $portNumber)
+        $tcp.Close()
+        return $true
+    } catch {
+        return $false
+    }
+}
 
-if ($portInUse) {
-    Write-Host "        UI already running at http://127.0.0.1:7860" -ForegroundColor Green
+function Test-HttpReady($targetUrl) {
+    try {
+        $response = Invoke-WebRequest -Uri $targetUrl -TimeoutSec 2 -ErrorAction Stop
+        return $response.StatusCode -eq 200
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-Python {
+    $candidates = @(
+        (Join-Path $root ".venv\Scripts\python.exe"),
+        (Join-Path $root "venv\Scripts\python.exe"),
+        "python",
+        "py"
+    )
+
+    foreach ($candidate in $candidates) {
+        try {
+            $cmd = Get-Command $candidate -ErrorAction Stop
+            return $cmd.Source
+        } catch {}
+    }
+
+    throw "Could not find Python. Install Python or create .venv, then run this again."
+}
+
+Write-Host ""
+Write-Host "  OpenMark Personal Knowledge Graph" -ForegroundColor Cyan
+Write-Host "  ---------------------------------" -ForegroundColor DarkGray
+Write-Host ""
+
+Write-Step "[1/4] Checking Neo4j..."
+if (-not (Test-TcpPort "127.0.0.1" 7687)) {
     Write-Host ""
-    Write-Host "  Opening browser..." -ForegroundColor Cyan
-    Start-Process "http://127.0.0.1:7860"
+    Write-Host "  Neo4j is not running." -ForegroundColor Yellow
+    Write-Host "  Start the OpenMark database in Neo4j Desktop, then run this again." -ForegroundColor Yellow
+    Write-Host ""
+    exit 1
+}
+Write-Host "        Neo4j bolt://127.0.0.1:7687 is running" -ForegroundColor Green
+
+Write-Step "[2/4] Checking existing UI..."
+if (Test-HttpReady $url) {
+    Write-Host "        UI already running at $url" -ForegroundColor Green
+    Start-Process $url
     exit 0
 }
 
-# ── 3. Start the UI ────────────────────────────────────────────────────────
-Write-Host "  [3/3] Starting OpenMark UI..." -ForegroundColor Gray
-Write-Host "        (loading pplx model + Neo4j connection — ~20 seconds)" -ForegroundColor DarkGray
+Write-Step "[3/4] Resolving Python..."
+$python = Resolve-Python
+Write-Host "        $python" -ForegroundColor Green
 
-$uiProcess = Start-Process -FilePath "C:\Python314\python.exe" `
+if (-not (Test-Path -LiteralPath $logDir)) {
+    New-Item -ItemType Directory -Path $logDir | Out-Null
+}
+
+Write-Step "[4/4] Starting UI..."
+Write-Host "        Logs: $stdoutLog and $stderrLog" -ForegroundColor DarkGray
+
+$process = Start-Process -FilePath $python `
     -ArgumentList "-m", "openmark.ui.app" `
-    -WorkingDirectory $PSScriptRoot `
-    -PassThru `
-    -WindowStyle Hidden
+    -WorkingDirectory $root `
+    -RedirectStandardOutput $stdoutLog `
+    -RedirectStandardError $stderrLog `
+    -PassThru
 
-# Wait for UI to be ready (poll port 7860)
 $ready = $false
-$tries = 0
-while (-not $ready -and $tries -lt 30) {
+for ($i = 1; $i -le 45; $i++) {
     Start-Sleep -Seconds 2
-    $tries++
-    try {
-        $r = Invoke-WebRequest -Uri "http://127.0.0.1:7860/" -TimeoutSec 2 -ErrorAction Stop
-        if ($r.StatusCode -eq 200) { $ready = $true }
-    } catch {}
-    Write-Host "        Waiting... ($($tries * 2)s)" -ForegroundColor DarkGray -NoNewline
-    Write-Host "`r" -NoNewline
+    if ($process.HasExited) {
+        Write-Host ""
+        Write-Host "  UI process exited early with code $($process.ExitCode)." -ForegroundColor Red
+        Write-Host "  Check logs:" -ForegroundColor Yellow
+        Write-Host "    $stdoutLog"
+        Write-Host "    $stderrLog"
+        exit $process.ExitCode
+    }
+
+    if (Test-HttpReady $url) {
+        $ready = $true
+        break
+    }
+
+    Write-Host "        Waiting... ($($i * 2)s)" -ForegroundColor DarkGray
 }
 
-if ($ready) {
+if (-not $ready) {
     Write-Host ""
-    Write-Host "  ✅  OpenMark is ready!" -ForegroundColor Green
-    Write-Host "      http://127.0.0.1:7860" -ForegroundColor Cyan
-    Write-Host ""
-    Start-Process "http://127.0.0.1:7860"
-} else {
-    Write-Host ""
-    Write-Host "  ⚠  UI didn't start in time. Check for errors." -ForegroundColor Yellow
-    Write-Host "     Try: python -m openmark.ui.app" -ForegroundColor Gray
+    Write-Host "  UI did not become ready in time, but process $($process.Id) is still running." -ForegroundColor Yellow
+    Write-Host "  Open $url manually or check logs." -ForegroundColor Yellow
+    exit 1
 }
+
+Write-Host ""
+Write-Host "  OpenMark is ready." -ForegroundColor Green
+Write-Host "  $url" -ForegroundColor Cyan
+Write-Host ""
+Start-Process $url

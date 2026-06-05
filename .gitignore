@@ -66,6 +66,7 @@ drafts/
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/*.db-journal
 data/openmark_chat.db
 
 # ── MCP config (machine-specific paths) ──────────────────────
@@ -122,9 +123,11 @@ data/CATEGORIZED.json
 nsfw_*.py
 nsfw_*.json
 scan_nsfw.py
+_*.py
 _purge_now.py
 app.py
 space_readme.md
+*.stackdump
 
 # ── Session / handoff / research / drafts (never push to remote) ─────────
 # Code only on remote. Markdown / research dossiers / generated drafts are local.
