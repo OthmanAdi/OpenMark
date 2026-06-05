@@ -61,6 +61,6 @@ list. Returns a NewsletterRoundup with 3-6 named buckets, 2-5 items per bucket.
 """,
 )
 def task_compose_roundup(brief: str) -> str:
-    result, dur = invoke_subagent(_get_graph(), brief)
+    result, dur = invoke_subagent(_get_graph(), brief, role="composer-roundup")
     return format_for_orchestrator(role="composer-roundup", result=result,
                                    duration_ms=dur, include_structured=True)

@@ -60,6 +60,6 @@ markdown. Returns the write_skill result string.
 """,
 )
 def task_author_skill(brief: str) -> str:
-    result, dur = invoke_subagent(_get_graph(), brief)
+    result, dur = invoke_subagent(_get_graph(), brief, role="skill-author")
     return format_for_orchestrator(role="skill-author", result=result,
                                    duration_ms=dur, include_structured=False)

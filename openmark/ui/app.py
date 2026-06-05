@@ -379,10 +379,88 @@ def _tool_card(ev: dict) -> str:
     return ""
 
 
+def _trace_label(ev: dict) -> str:
+    agent = ev.get("agent") or "orchestrator"
+    tool = ev.get("tool") or "?"
+    if tool.startswith("task_"):
+        return f"orchestrator -> {tool.removeprefix('task_')}"
+    return f"{agent} -> {tool}"
+
+
+def _trace_preview(ev: dict) -> str:
+    if ev.get("kind") == "tool_start":
+        args = ev.get("args") or {}
+        if not args:
+            return ""
+        text = _fmt_args(args)
+        return _esc(text[:220])
+    if ev.get("kind") == "tool_end":
+        preview = (ev.get("preview") or "").replace("\n", " ").strip()
+        return _esc(preview[:240])
+    if ev.get("kind") == "tool_error":
+        return _esc(str(ev.get("error") or "")[:240])
+    if ev.get("kind") in {"thinking", "turn_thinking"}:
+        return _esc((ev.get("text") or "").replace("\n", " ")[:240])
+    return ""
+
+
+def _trace_panel(events: list[dict], *, active: bool = False) -> str:
+    if not events:
+        rows = "<div class='om-trace-empty'>No sub-agent work yet.</div>"
+    else:
+        rendered = []
+        for ev in events[-80:]:
+            kind = ev.get("kind", "")
+            if kind == "tool_start":
+                icon, state = "▶", "running"
+            elif kind == "tool_end":
+                icon, state = "✓", "done"
+            elif kind == "tool_error":
+                icon, state = "✗", "error"
+            elif kind in {"thinking", "turn_thinking"}:
+                icon, state = "◇", "thinking"
+            else:
+                icon, state = "•", "note"
+            dur = ev.get("duration_ms")
+            dur_text = f" · {int(float(dur))}ms" if dur is not None else ""
+            rendered.append(
+                "<div class='om-trace-row om-trace-" + state + "'>"
+                f"<div class='om-trace-icon'>{icon}</div>"
+                "<div class='om-trace-body'>"
+                f"<div class='om-trace-title'>{_esc(_trace_label(ev))}<span>{dur_text}</span></div>"
+                f"<div class='om-trace-preview'>{_trace_preview(ev)}</div>"
+                "</div></div>"
+            )
+        rows = "".join(rendered)
+    badge = "running" if active else "idle"
+    return (
+        "<details class='om-live-window' open>"
+        "<summary>"
+        "<span>Sub-agent live work</span>"
+        f"<b class='om-live-badge'>{badge}</b>"
+        "</summary>"
+        f"<div class='om-trace-list'>{rows}</div>"
+        "</details>"
+    )
+
+
+def _trace_event_from_stream_payload(payload: dict) -> dict | None:
+    kind = payload.get("kind") if isinstance(payload, dict) else None
+    if kind in {"tool_start", "tool_end", "tool_error", "thinking", "turn_thinking"}:
+        return payload
+    return None
+
+
 DRAFTS_DIR = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "drafts")
 )
 os.makedirs(DRAFTS_DIR, exist_ok=True)
+
+ARTIFACTS_DIR = os.path.normpath(
+    os.getenv("OPENMARK_OBSIDIAN_ARTIFACT_DIR")
+    or os.path.join(os.path.dirname(__file__), "..", "..", "drafts", "obsidian")
+)
+os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
 
 def _slugify(s: str, n: int = 50) -> str:
@@ -393,6 +471,35 @@ def _slugify(s: str, n: int = 50) -> str:
 
 
 _URL_RE = __import__("re").compile(r"https?://[^\s\)\]'\"<>]+", __import__("re").IGNORECASE)
+
+
+def _sanitize_visible_markdown(md: str) -> str:
+    """Keep chat readable by replacing heavy embedded media with compact links.
+
+    The clean-copy button and Obsidian artifact keep the original markdown.
+    This only affects the visible Gradio chat bubble, where arbitrary scraped
+    images/iframes/canvas/svg blocks can otherwise cover the answer.
+    """
+    import re as _re
+    text = md or ""
+
+    def _image_link(match: _re.Match) -> str:
+        alt = (match.group(1) or "image").strip() or "image"
+        url = (match.group(2) or "").strip()
+        return f"[Image omitted: {alt}]({url})" if url else f"Image omitted: {alt}"
+
+    text = _re.sub(r"!\[([^\]]*)\]\(([^\)]+)\)", _image_link, text)
+
+    def _tag_note(match: _re.Match) -> str:
+        tag = match.group(1).lower()
+        src_match = _re.search(r"\bsrc\s*=\s*['\"]([^'\"]+)['\"]", match.group(0), _re.I)
+        src = src_match.group(1) if src_match else ""
+        label = f"{tag} omitted"
+        return f"<span class='om-media-note'>{label}: <a href='{_esc(src)}' target='_blank'>{_esc(src)}</a></span>" if src else f"<span class='om-media-note'>{label}</span>"
+
+    text = _re.sub(r"<(iframe|canvas|svg|video|audio|picture)\b[\s\S]*?</\1>", _tag_note, text, flags=_re.I)
+    text = _re.sub(r"<(img|source)\b[^>]*>", _tag_note, text, flags=_re.I)
+    return text
 
 
 def _looks_like_report(md: str) -> bool:
@@ -470,7 +577,7 @@ def _maybe_export_report(md: str, first_line_title: str = "") -> str:
     )
 
 
-def chat_fn(message: str, history: list, session_id: int | None):
+def chat_fn(message: str, history: list, session_id: int | None, *, include_events: bool = False):
     """
     Streaming generator for gr.ChatInterface.
 
@@ -479,11 +586,12 @@ def chat_fn(message: str, history: list, session_id: int | None):
     lazily on first message of a fresh session.
     """
     if _agent is None:
-        yield (
+        unavailable = (
             "**Agent unavailable** — Azure API key not configured in `.env`.\n\n"
             "Use the **Search** tab — it works fully offline with local pplx-embed.\n\n"
             f"*Error: {_agent_error}*"
         )
+        yield {"content": unavailable, "event": None} if include_events else unavailable
         return
 
     from openmark.agent.graph import ask_stream
@@ -625,7 +733,12 @@ def chat_fn(message: str, history: list, session_id: int | None):
                 # Arabic/Hebrew text is present so Arabic newsletters render
                 # the way they should (right-aligned, Arabic-friendly font).
                 copy_block = _clean_copy_block(clean_final_text, idx=int(time.time() * 1000))
-                visible_final = _wrap_rtl_if_needed(final)
+                visible_markdown = _sanitize_visible_markdown(final)
+                visible_final = (
+                    "<div class='om-final-answer'>\n\n"
+                    + _wrap_rtl_if_needed(visible_markdown)
+                    + "\n\n</div>"
+                )
 
                 # FINAL layout: copy button + final answer FIRST so the user
                 # lands on it, then thinking (if any), then collapsed tool
@@ -638,10 +751,12 @@ def chat_fn(message: str, history: list, session_id: int | None):
 
                 log.info(f"[chat_fn] final emitted: {len(final):,} chars, "
                          f"rtl={_has_rtl(final)} first 80={final[:80]!r}")
-            yield "\n\n".join(parts)
+            content = "\n\n".join(parts)
+            yield {"content": content, "event": ev} if include_events else content
     except Exception as e:
         parts.append(f"\n\n❌ **Agent error:** `{e}`")
-        yield "\n\n".join(parts)
+        content = "\n\n".join(parts)
+        yield {"content": content, "event": None} if include_events else content
     finally:
         # Persist the assistant message exactly as the user saw it, plus the
         # thinking trace and tool events for full replay fidelity.
@@ -746,26 +861,85 @@ BASE_CSS = """
 footer { display: none !important; }
 #search-list { overflow-y: auto; max-height: 680px; }
 #search-graph iframe { border-radius: 12px; }
-#om-chatbot, #om-chatbot .prose, #om-chatbot .markdown { color: #0f172a !important; }
-#om-chatbot p, #om-chatbot li, #om-chatbot td, #om-chatbot th { color: #0f172a !important; opacity: 1 !important; }
-#om-chatbot a { color: #3730a3 !important; }
-#om-chatbot pre, #om-chatbot code { background: #f8fafc !important; color: #0f172a !important; opacity: 1 !important; text-shadow: none !important; }
-#om-chatbot .om-agent-card { background: #f8fafc !important; color: #0f172a !important; border: 1px solid #cbd5e1 !important; border-left-width: 4px !important; padding: 8px 12px; margin: 8px 0; border-radius: 8px; box-shadow: 0 1px 2px rgba(15, 23, 42, .06); }
+#om-chatbot details, #om-chatbot summary, #om-chatbot details * { opacity: 1 !important; text-shadow: none !important; }
 #om-chatbot .om-tool-start { border-left-color: #6366f1 !important; }
 #om-chatbot .om-tool-end { border-left-color: #16a34a !important; }
 #om-chatbot .om-tool-error { border-left-color: #ef4444 !important; }
-#om-chatbot .om-thinking { border-left-color: #a855f7 !important; }
+#om-chatbot .om-thinking {
+  background: #111827 !important;
+  color: #e5e7eb !important;
+  border: 1px solid #4b5563 !important;
+  border-left: 4px solid #a855f7 !important;
+  box-shadow: none !important;
+}
+#om-chatbot .om-thinking,
+#om-chatbot .om-thinking *,
+#om-chatbot .om-thinking summary,
+#om-chatbot .om-thinking .om-thinking-label {
+  color: #e5e7eb !important;
+  opacity: 1 !important;
+  text-shadow: none !important;
+}
+#om-chatbot .om-thinking .om-codeblock,
+#om-chatbot .om-thinking pre,
+#om-chatbot .om-thinking code {
+  background: #020617 !important;
+  color: #f8fafc !important;
+  border: 1px solid #64748b !important;
+}
 #om-chatbot .om-todo { border-left-color: #8b5cf6 !important; }
-#om-chatbot .om-muted { color: #475569 !important; opacity: 1 !important; }
-#om-chatbot .om-title { color: #111827 !important; font-weight: 700; }
-#om-chatbot .om-accent { color: #4f46e5 !important; font-weight: 700; }
-#om-chatbot .om-success { color: #15803d !important; font-weight: 700; }
-#om-chatbot .om-danger { color: #b91c1c !important; font-weight: 700; }
-#om-chatbot .om-thinking-label { color: #7e22ce !important; }
-#om-chatbot .om-codeblock { background: #ffffff !important; color: #0f172a !important; border: 1px solid #cbd5e1 !important; border-radius: 6px; padding: 8px 10px; max-height: 420px; overflow: auto; line-height: 1.5; font-family: ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; opacity: 1 !important; }
-#om-chatbot details, #om-chatbot summary, #om-chatbot details * { opacity: 1 !important; text-shadow: none !important; }
-#om-chatbot .om-copy-btn { display: inline-flex; align-items: center; gap: 6px; background: #ffffff; color: #1e293b; border: 1px solid #cbd5e1; padding: 5px 12px; border-radius: 6px; font-size: .82em; cursor: pointer; margin: 0 0 10px 0; }
+#om-chatbot .om-title { font-weight: 700; }
+#om-chatbot .om-accent { font-weight: 700; }
+#om-chatbot .om-success { font-weight: 700; }
+#om-chatbot .om-danger { font-weight: 700; }
+#om-chatbot .om-codeblock { border-radius: 6px; padding: 8px 10px; max-height: 420px; overflow: auto; line-height: 1.5; font-family: ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; opacity: 1 !important; }
+#om-chatbot .om-copy-btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 6px; font-size: .82em; cursor: pointer; margin: 0 0 10px 0; }
 #om-chatbot .om-copy-btn:focus-visible { outline: 2px solid #6366f1; outline-offset: 2px; }
+#om-chatbot .om-final-answer { color: inherit !important; background: transparent !important; line-height: 1.65; overflow-wrap: anywhere; }
+#om-chatbot .om-final-answer * { max-width: 100%; opacity: 1 !important; text-shadow: none !important; }
+#om-chatbot .om-final-answer img { display: block; max-width: min(100%, 760px) !important; max-height: 280px !important; width: auto !important; height: auto !important; object-fit: contain !important; border-radius: 12px; margin: 10px 0; }
+#om-chatbot .om-final-answer table { display: block; overflow-x: auto; border-collapse: collapse; }
+#om-chatbot .om-media-note { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; margin: 6px 0; padding: 5px 9px; border-radius: 999px; border: 1px solid #cbd5e1; background: #f8fafc; color: #475569 !important; font-size: .78rem; }
+@media (prefers-color-scheme: light) {
+  #om-chatbot, #om-chatbot .prose, #om-chatbot .markdown { color: #0f172a !important; }
+  #om-chatbot p, #om-chatbot li, #om-chatbot td, #om-chatbot th { color: #0f172a !important; opacity: 1 !important; }
+  #om-chatbot a { color: #3730a3 !important; }
+  #om-chatbot pre, #om-chatbot code { background: #f8fafc !important; color: #0f172a !important; opacity: 1 !important; text-shadow: none !important; }
+  #om-chatbot .om-agent-card { background: #f8fafc !important; color: #0f172a !important; border: 1px solid #cbd5e1 !important; border-left-width: 4px !important; padding: 8px 12px; margin: 8px 0; border-radius: 8px; box-shadow: 0 1px 2px rgba(15, 23, 42, .06); }
+  #om-chatbot .om-thinking {
+    background: #111827 !important;
+    color: #e5e7eb !important;
+    border: 1px solid #4b5563 !important;
+    border-left: 4px solid #a855f7 !important;
+    box-shadow: none !important;
+  }
+  #om-chatbot .om-thinking,
+  #om-chatbot .om-thinking *,
+  #om-chatbot .om-thinking summary,
+  #om-chatbot .om-thinking .om-thinking-label {
+    color: #e5e7eb !important;
+    opacity: 1 !important;
+    text-shadow: none !important;
+  }
+  #om-chatbot .om-thinking .om-codeblock,
+  #om-chatbot .om-thinking pre,
+  #om-chatbot .om-thinking code {
+    background: #020617 !important;
+    color: #f8fafc !important;
+    border: 1px solid #64748b !important;
+  }
+  #om-chatbot .om-muted { color: #475569 !important; opacity: 1 !important; }
+  #om-chatbot .om-title { color: #111827 !important; }
+  #om-chatbot .om-accent { color: #4f46e5 !important; }
+  #om-chatbot .om-success { color: #15803d !important; }
+  #om-chatbot .om-danger { color: #b91c1c !important; }
+  #om-chatbot .om-thinking-label { color: #7e22ce !important; }
+  #om-chatbot .om-codeblock { background: #ffffff !important; color: #0f172a !important; border: 1px solid #cbd5e1 !important; }
+  #om-chatbot .om-copy-btn { background: #ffffff; color: #1e293b; border: 1px solid #cbd5e1; }
+  #om-chatbot .om-final-answer,
+  #om-chatbot .om-final-answer * { color: #0f172a !important; }
+  #om-chatbot .om-final-answer a, #om-chatbot .om-final-answer a * { color: #3730a3 !important; }
+}
 .om-config-hero { background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 54%, #fff7ed 100%); border: 1px solid #c7d2fe; border-radius: 18px; padding: 18px 22px; margin: 4px 0 16px; color: #111827; box-shadow: 0 18px 45px rgba(79, 70, 229, .10); }
 .om-config-hero h2 { margin: 0 0 6px; font-size: 1.35rem; letter-spacing: -.02em; color: #111827; }
 .om-config-hero p { margin: 0; color: #475569; max-width: 860px; line-height: 1.55; }
@@ -776,31 +950,162 @@ footer { display: none !important; }
 .om-config-status { border-radius: 12px; padding: 10px 12px; margin: 8px 0 0; font-weight: 700; }
 .om-config-ok { background: #ecfdf5; border: 1px solid #86efac; color: #166534; }
 .om-config-error { background: #fef2f2; border: 1px solid #fca5a5; color: #991b1b; white-space: pre-wrap; }
+.om-chat-controls { align-items: end !important; margin-bottom: 8px !important; }
+.om-chat-controls .form { gap: 2px !important; }
+.om-chat-controls label { margin-bottom: 2px !important; font-size: .78rem !important; }
+#om-chatbot { min-height: 640px !important; }
+.om-live-window { position: fixed; right: 24px; bottom: 94px; z-index: 9999; width: min(440px, calc(100vw - 32px)); max-height: 58vh; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 16px; box-shadow: 0 24px 80px rgba(2, 6, 23, .42); overflow: hidden; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.om-live-window summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; cursor: pointer; padding: 10px 12px; color: #f8fafc; font-weight: 800; font-size: .86rem; background: linear-gradient(135deg, #1e1b4b, #0f172a); border-bottom: 1px solid #334155; list-style: none; }
+.om-live-window summary::-webkit-details-marker { display: none; }
+.om-live-badge { color: #c4b5fd; border: 1px solid #4f46e5; background: rgba(79, 70, 229, .20); border-radius: 999px; padding: 2px 8px; font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; }
+.om-trace-list { max-height: calc(58vh - 42px); overflow: auto; padding: 8px; }
+.om-trace-empty { color: #94a3b8; padding: 12px; font-size: .84rem; }
+.om-trace-row { display: grid; grid-template-columns: 24px 1fr; gap: 8px; padding: 8px; border-radius: 10px; border: 1px solid #1e293b; background: #111827; margin-bottom: 7px; }
+.om-trace-icon { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 999px; background: #1e293b; color: #c4b5fd; font-size: .78rem; font-weight: 900; }
+.om-trace-title { color: #f8fafc; font-size: .78rem; font-weight: 800; line-height: 1.35; display: flex; justify-content: space-between; gap: 8px; }
+.om-trace-title span { color: #94a3b8; font-weight: 700; white-space: nowrap; }
+.om-trace-preview { color: #cbd5e1; font-size: .72rem; line-height: 1.35; margin-top: 3px; word-break: break-word; }
+.om-trace-done .om-trace-icon { color: #86efac; }
+.om-trace-error { border-color: #7f1d1d; }
+.om-trace-error .om-trace-icon { color: #fca5a5; }
+.om-trace-thinking .om-trace-icon { color: #f0abfc; }
+@media (max-width: 860px) { .om-live-window { right: 10px; bottom: 80px; width: calc(100vw - 20px); max-height: 42vh; } }
 """
 
-# Dark-only override applied when OPENMARK_THEME=dark.
-DARK_OVERRIDE_CSS = """
-body, .gradio-container { background: #020617 !important; color: #e2e8f0 !important; }
-#om-chatbot, #om-chatbot .prose, #om-chatbot .markdown, #om-chatbot p, #om-chatbot li, #om-chatbot td, #om-chatbot th { color: #e2e8f0 !important; }
-#om-chatbot a { color: #7dd3fc !important; }
-#om-chatbot pre, #om-chatbot code { background: #0b1220 !important; color: #cbd5e1 !important; }
-#om-chatbot .om-agent-card { background: #0f172a !important; color: #cbd5e1 !important; border-color: #334155 !important; box-shadow: none; }
-#om-chatbot .om-muted { color: #94a3b8 !important; }
-#om-chatbot .om-title { color: #e2e8f0 !important; }
-#om-chatbot .om-accent { color: #a5b4fc !important; }
-#om-chatbot .om-success { color: #86efac !important; }
-#om-chatbot .om-danger { color: #fca5a5 !important; }
-#om-chatbot .om-thinking-label { color: #c4b5fd !important; }
-#om-chatbot .om-codeblock { background: #0b1220 !important; color: #cbd5e1 !important; border-color: #1e293b !important; }
-#om-chatbot .om-copy-btn { background: #1e293b; color: #cbd5e1; border-color: #334155; }
-.om-config-hero, .om-config-card { background: #0f172a; color: #e2e8f0; border-color: #334155; box-shadow: none; }
-.om-config-hero h2, .om-config-card h3 { color: #f8fafc; }
-.om-config-hero p, .om-config-card p { color: #94a3b8; }
-.om-config-pill { background: #1e293b; border-color: #334155; color: #cbd5e1; }
+# Gradio can switch dark mode via URL or browser UI. This is the only dark
+# layer: scoped to #openmark-app, token-based, and appended last so it does
+# not leak into light mode.
+DARK_SCOPED_CSS = """
+html.dark #openmark-app, body.dark #openmark-app, .dark #openmark-app,
+[data-theme="dark"] #openmark-app, #openmark-app.dark {
+  --om-bg: #050816;
+  --om-bg-2: #090d1f;
+  --om-panel: #0f172a;
+  --om-panel-2: #111c31;
+  --om-panel-3: #172238;
+  --om-border: #2b3a55;
+  --om-border-soft: #1d2a40;
+  --om-text: #e7eefb;
+  --om-heading: #f8fbff;
+  --om-muted: #9aa8bf;
+  --om-dim: #708198;
+  --om-accent: #8b7cff;
+  --om-accent-2: #38bdf8;
+  --om-success: #6ee7b7;
+  --om-danger: #fca5a5;
+  --om-warning: #fbbf24;
+}
+
+html.dark body, body.dark, html.dark .gradio-container, body.dark .gradio-container,
+.dark .gradio-container, [data-theme="dark"] body, [data-theme="dark"] .gradio-container {
+  background:
+    radial-gradient(circle at 15% 0%, rgba(99,102,241,.20), transparent 28rem),
+    radial-gradient(circle at 80% 12%, rgba(14,165,233,.12), transparent 30rem),
+    var(--om-bg, #050816) !important;
+  color: var(--om-text, #e7eefb) !important;
+}
+
+html.dark #openmark-app *, body.dark #openmark-app *, .dark #openmark-app *, [data-theme="dark"] #openmark-app * {
+  scrollbar-color: #52637d #101827;
+}
+html.dark #openmark-app *::-webkit-scrollbar-track, body.dark #openmark-app *::-webkit-scrollbar-track, .dark #openmark-app *::-webkit-scrollbar-track, [data-theme="dark"] #openmark-app *::-webkit-scrollbar-track { background: #101827; }
+html.dark #openmark-app *::-webkit-scrollbar-thumb, body.dark #openmark-app *::-webkit-scrollbar-thumb, .dark #openmark-app *::-webkit-scrollbar-thumb, [data-theme="dark"] #openmark-app *::-webkit-scrollbar-thumb { background: #52637d; border: 3px solid #101827; border-radius: 999px; }
+
+html.dark #openmark-app .tabs, body.dark #openmark-app .tabs, .dark #openmark-app .tabs, [data-theme="dark"] #openmark-app .tabs { border-color: var(--om-border, #2b3a55) !important; }
+html.dark #openmark-app button, body.dark #openmark-app button, .dark #openmark-app button, [data-theme="dark"] #openmark-app button {
+  border-color: var(--om-border, #2b3a55) !important;
+  color: var(--om-heading, #f8fbff) !important;
+}
+html.dark #openmark-app input, html.dark #openmark-app textarea, html.dark #openmark-app select,
+body.dark #openmark-app input, body.dark #openmark-app textarea, body.dark #openmark-app select,
+.dark #openmark-app input, .dark #openmark-app textarea, .dark #openmark-app select,
+[data-theme="dark"] #openmark-app input, [data-theme="dark"] #openmark-app textarea, [data-theme="dark"] #openmark-app select {
+  background: var(--om-panel-2, #111c31) !important;
+  color: var(--om-text, #e7eefb) !important;
+  border-color: var(--om-border, #2b3a55) !important;
+}
+
+html.dark #om-chatbot, body.dark #om-chatbot, .dark #om-chatbot, [data-theme="dark"] #om-chatbot {
+  background: linear-gradient(180deg, var(--om-panel, #0f172a), #0b1224) !important;
+  border: 1px solid var(--om-border, #2b3a55) !important;
+  border-radius: 18px !important;
+  box-shadow: inset 0 1px rgba(255,255,255,.03), 0 16px 60px rgba(0,0,0,.22) !important;
+}
+html.dark #om-chatbot *, body.dark #om-chatbot *, .dark #om-chatbot *, [data-theme="dark"] #om-chatbot * {
+  color: var(--om-text, #e7eefb) !important;
+  opacity: 1 !important;
+  text-shadow: none !important;
+}
+html.dark #om-chatbot a, html.dark #om-chatbot a *, body.dark #om-chatbot a, body.dark #om-chatbot a *, .dark #om-chatbot a, .dark #om-chatbot a *, [data-theme="dark"] #om-chatbot a, [data-theme="dark"] #om-chatbot a * {
+  color: var(--om-accent-2, #38bdf8) !important;
+}
+html.dark #om-chatbot [class*="message"], body.dark #om-chatbot [class*="message"], .dark #om-chatbot [class*="message"], [data-theme="dark"] #om-chatbot [class*="message"],
+html.dark #om-chatbot [class*="bubble"], body.dark #om-chatbot [class*="bubble"], .dark #om-chatbot [class*="bubble"], [data-theme="dark"] #om-chatbot [class*="bubble"] {
+  background: transparent !important;
+}
+html.dark #om-chatbot .om-agent-card, body.dark #om-chatbot .om-agent-card, .dark #om-chatbot .om-agent-card, [data-theme="dark"] #om-chatbot .om-agent-card {
+  background: var(--om-panel-2, #111c31) !important;
+  color: var(--om-text, #e7eefb) !important;
+  border: 1px solid var(--om-border, #2b3a55) !important;
+  border-left-width: 4px !important;
+  box-shadow: 0 10px 30px rgba(0,0,0,.16) !important;
+}
+html.dark #om-chatbot .om-codeblock, html.dark #om-chatbot pre, html.dark #om-chatbot code,
+body.dark #om-chatbot .om-codeblock, body.dark #om-chatbot pre, body.dark #om-chatbot code,
+.dark #om-chatbot .om-codeblock, .dark #om-chatbot pre, .dark #om-chatbot code,
+[data-theme="dark"] #om-chatbot .om-codeblock, [data-theme="dark"] #om-chatbot pre, [data-theme="dark"] #om-chatbot code {
+  background: #070b16 !important;
+  color: #dbeafe !important;
+  border-color: var(--om-border-soft, #1d2a40) !important;
+}
+html.dark #om-chatbot .om-muted, body.dark #om-chatbot .om-muted, .dark #om-chatbot .om-muted, [data-theme="dark"] #om-chatbot .om-muted { color: var(--om-muted, #9aa8bf) !important; }
+html.dark #om-chatbot .om-title, body.dark #om-chatbot .om-title, .dark #om-chatbot .om-title, [data-theme="dark"] #om-chatbot .om-title { color: var(--om-heading, #f8fbff) !important; }
+html.dark #om-chatbot .om-accent, body.dark #om-chatbot .om-accent, .dark #om-chatbot .om-accent, [data-theme="dark"] #om-chatbot .om-accent { color: var(--om-accent, #8b7cff) !important; }
+html.dark #om-chatbot .om-success, body.dark #om-chatbot .om-success, .dark #om-chatbot .om-success, [data-theme="dark"] #om-chatbot .om-success { color: var(--om-success, #6ee7b7) !important; }
+html.dark #om-chatbot .om-danger, body.dark #om-chatbot .om-danger, .dark #om-chatbot .om-danger, [data-theme="dark"] #om-chatbot .om-danger { color: var(--om-danger, #fca5a5) !important; }
+html.dark #om-chatbot .om-copy-btn, body.dark #om-chatbot .om-copy-btn, .dark #om-chatbot .om-copy-btn, [data-theme="dark"] #om-chatbot .om-copy-btn {
+  background: var(--om-panel-3, #172238) !important;
+  color: var(--om-heading, #f8fbff) !important;
+  border: 1px solid var(--om-border, #2b3a55) !important;
+}
+html.dark #om-chatbot .om-final-answer, html.dark #om-chatbot .om-final-answer *,
+body.dark #om-chatbot .om-final-answer, body.dark #om-chatbot .om-final-answer *,
+.dark #om-chatbot .om-final-answer, .dark #om-chatbot .om-final-answer *,
+[data-theme="dark"] #om-chatbot .om-final-answer, [data-theme="dark"] #om-chatbot .om-final-answer * {
+  color: var(--om-text, #e7eefb) !important;
+  background-color: transparent !important;
+  border-color: var(--om-border, #2b3a55) !important;
+}
+html.dark #om-chatbot .om-final-answer img, body.dark #om-chatbot .om-final-answer img, .dark #om-chatbot .om-final-answer img, [data-theme="dark"] #om-chatbot .om-final-answer img {
+  display: block;
+  max-width: min(100%, 760px) !important;
+  max-height: 280px !important;
+  width: auto !important;
+  height: auto !important;
+  object-fit: contain !important;
+  border-radius: 14px;
+  margin: 12px 0;
+}
+html.dark #om-chatbot .om-media-note, body.dark #om-chatbot .om-media-note, .dark #om-chatbot .om-media-note, [data-theme="dark"] #om-chatbot .om-media-note {
+  background: var(--om-panel-3, #172238) !important;
+  border-color: var(--om-border, #2b3a55) !important;
+  color: var(--om-muted, #9aa8bf) !important;
+}
+html.dark #om-chatbot .om-thinking, body.dark #om-chatbot .om-thinking, .dark #om-chatbot .om-thinking, [data-theme="dark"] #om-chatbot .om-thinking {
+  background: linear-gradient(180deg, #17122a, #0f172a) !important;
+  border-left-color: #c084fc !important;
+}
+html.dark .om-config-hero, html.dark .om-config-card, body.dark .om-config-hero, body.dark .om-config-card, .dark .om-config-hero, .dark .om-config-card, [data-theme="dark"] .om-config-hero, [data-theme="dark"] .om-config-card {
+  background: var(--om-panel, #0f172a) !important;
+  color: var(--om-text, #e7eefb) !important;
+  border-color: var(--om-border, #2b3a55) !important;
+  box-shadow: 0 16px 40px rgba(0,0,0,.16) !important;
+}
+html.dark .om-config-hero h2, html.dark .om-config-card h3, body.dark .om-config-hero h2, body.dark .om-config-card h3, .dark .om-config-hero h2, .dark .om-config-card h3, [data-theme="dark"] .om-config-hero h2, [data-theme="dark"] .om-config-card h3 { color: var(--om-heading, #f8fbff) !important; }
+html.dark .om-config-hero p, html.dark .om-config-card p, body.dark .om-config-hero p, body.dark .om-config-card p, .dark .om-config-hero p, .dark .om-config-card p, [data-theme="dark"] .om-config-hero p, [data-theme="dark"] .om-config-card p { color: var(--om-muted, #9aa8bf) !important; }
 """
 
-if OPENMARK_THEME == "dark":
-    BASE_CSS = BASE_CSS + DARK_OVERRIDE_CSS
+BASE_CSS = BASE_CSS + DARK_SCOPED_CSS
 
 # Kept as alias so the existing `css=DARK_CSS` reference at launch keeps working.
 DARK_CSS = BASE_CSS
@@ -1160,7 +1465,7 @@ def _render_agent_config_tab():
 def build_ui():
     categories = ["All"] + config.CATEGORIES
 
-    with gr.Blocks(title="OpenMark") as app:
+    with gr.Blocks(title="OpenMark", elem_id="openmark-app") as app:
 
         try:
             _s = neo4j_store.get_stats() if _embedder else {}
@@ -1247,27 +1552,27 @@ def build_ui():
                 def _load_session(sid_choice: int | None):
                     """Return chatbot messages list + the int session id, given a dropdown value."""
                     if not sid_choice:
-                        return [], None
+                        return [], None, _trace_panel([])
                     try:
                         sid = int(sid_choice)
                     except (TypeError, ValueError):
-                        return [], None
+                        return [], None, _trace_panel([])
                     rows = _history.get_messages(sid)
                     msgs = [{"role": r["role"], "content": r["content"]} for r in rows]
-                    return msgs, sid
+                    return msgs, sid, _trace_panel([])
 
                 def _new_chat():
                     """Clear chatbot + session state. Refresh the dropdown."""
-                    return [], None, gr.update(choices=_session_choices(), value=None)
+                    return [], None, gr.update(choices=_session_choices(), value=None), _trace_panel([])
 
                 def _delete_chat(sid_choice):
                     if not sid_choice:
-                        return [], None, gr.update(choices=_session_choices(), value=None)
+                        return [], None, gr.update(choices=_session_choices(), value=None), _trace_panel([])
                     try:
                         _history.delete_session(int(sid_choice))
                     except Exception as e:
                         print(f"[history] delete failed: {e}")
-                    return [], None, gr.update(choices=_session_choices(), value=None)
+                    return [], None, gr.update(choices=_session_choices(), value=None), _trace_panel([])
 
                 def _refresh_sessions():
                     return gr.update(choices=_session_choices())
@@ -1276,13 +1581,12 @@ def build_ui():
                 session_id_state = gr.State(value=None)
 
                 # Top bar — history controls
-                with gr.Row():
+                with gr.Row(elem_classes=["om-chat-controls"]):
                     new_chat_btn = gr.Button("✨ New chat", variant="primary", scale=1, min_width=110)
                     session_dd = gr.Dropdown(
                         choices=_session_choices(),
                         value=None,
-                        label="Previous chats (persisted)",
-                        info="Pick a past chat to reload it. SQLite-backed, survives refresh.",
+                        label="Previous chats",
                         scale=5,
                         interactive=True,
                     )
@@ -1322,7 +1626,8 @@ def build_ui():
                 # leaves the textbox alone.
                 chatbot = gr.Chatbot(
                     elem_id="om-chatbot",
-                    height=620,
+                    height="calc(100vh - 285px)",
+                    min_height=640,
                     placeholder=(
                         "<div style='text-align:center;color:#475569;padding:40px'>"
                         "<div style='font-size:2em'>🔖</div>"
@@ -1362,6 +1667,11 @@ def build_ui():
                         "50%{opacity:.45;transform:scale(.78)}}</style>"
                     ),
                     visible=False,
+                )
+
+                trace_panel = gr.HTML(
+                    value=_trace_panel([]),
+                    elem_id="om-trace-host",
                 )
 
                 with gr.Row():
@@ -1419,7 +1729,7 @@ def build_ui():
                     msg = (msg or "").strip()
                     if not msg:
                         # Nothing to send — leave UI alone (preserve session_id).
-                        yield gr.update(), history or [], _SEND_IDLE, _BADGE_OFF, session_id
+                        yield gr.update(), history or [], _SEND_IDLE, _BADGE_OFF, session_id, _trace_panel([])
                         return
 
                     # Create the session NOW if it doesn't exist yet, so we can
@@ -1430,21 +1740,29 @@ def build_ui():
                     # Stage 1 — instant repaint: clear textbox, push user msg,
                     # disable Send, show "working" badge.
                     history = (history or []) + [{"role": "user", "content": msg}]
-                    yield "", history, _SEND_BUSY, _BADGE_ON, session_id
+                    trace_events: list[dict] = []
+                    yield "", history, _SEND_BUSY, _BADGE_ON, session_id, _trace_panel(trace_events, active=True)
 
                     # Stage 2 — stream the assistant response into a fresh slot.
                     history = history + [{"role": "assistant", "content": ""}]
                     user_msg = _coerce_content_to_str(history[-2]["content"])
-                    for chunk in chat_fn(user_msg, history[:-1], session_id):
+                    for payload in chat_fn(user_msg, history[:-1], session_id, include_events=True):
+                        if isinstance(payload, dict):
+                            chunk = payload.get("content", "")
+                            trace_event = _trace_event_from_stream_payload(payload.get("event"))
+                            if trace_event:
+                                trace_events.append(trace_event)
+                        else:
+                            chunk = payload
                         history[-1]["content"] = chunk
                         # textbox + busy state unchanged during streaming; only
                         # the chatbot history mutates. session_id stays put.
-                        yield gr.update(), history, _SEND_BUSY, _BADGE_ON, session_id
+                        yield gr.update(), history, _SEND_BUSY, _BADGE_ON, session_id, _trace_panel(trace_events, active=True)
 
                     # Stage 3 — done. Flip Send back to idle and hide the badge.
-                    yield gr.update(), history, _SEND_IDLE, _BADGE_OFF, session_id
+                    yield gr.update(), history, _SEND_IDLE, _BADGE_OFF, session_id, _trace_panel(trace_events, active=False)
 
-                _send_outputs = [chat_input, chatbot, send_btn, status_badge, session_id_state]
+                _send_outputs = [chat_input, chatbot, send_btn, status_badge, session_id_state, trace_panel]
                 submit_evt = chat_input.submit(
                     _send_and_stream,
                     [chat_input, chatbot, session_id_state],
@@ -1476,7 +1794,7 @@ def build_ui():
                 session_dd.change(
                     fn=_load_session,
                     inputs=[session_dd],
-                    outputs=[chatbot, session_id_state],
+                    outputs=[chatbot, session_id_state, trace_panel],
                     show_progress="hidden",
                     cancels=[submit_evt, click_evt],
                 ).then(
@@ -1486,7 +1804,7 @@ def build_ui():
                 new_chat_btn.click(
                     fn=_new_chat,
                     inputs=None,
-                    outputs=[chatbot, session_id_state, session_dd],
+                    outputs=[chatbot, session_id_state, session_dd, trace_panel],
                     show_progress="hidden",
                     cancels=[submit_evt, click_evt],
                 ).then(
@@ -1496,7 +1814,7 @@ def build_ui():
                 delete_btn.click(
                     fn=_delete_chat,
                     inputs=[session_dd],
-                    outputs=[chatbot, session_id_state, session_dd],
+                    outputs=[chatbot, session_id_state, session_dd, trace_panel],
                     show_progress="hidden",
                     cancels=[submit_evt, click_evt],
                 ).then(
@@ -1793,10 +2111,8 @@ def build_ui():
 
 if __name__ == "__main__":
     ui = build_ui()
-    # Theme selection: Soft = Gradio's light theme; Base = original mostly-neutral.
-    # When the user wants dark, we still use Soft as the base but layer the
-    # DARK_OVERRIDE_CSS on top — Soft's accents look better than Base's even
-    # in dark mode.
+    # Theme selection: Gradio owns the base component theme. OpenMark layers
+    # scoped light/dark tokens above it through DARK_CSS.
     _selected_theme = gr.themes.Soft(primary_hue="indigo", neutral_hue="slate")
     ui.launch(
         server_name="127.0.0.1",
@@ -1807,5 +2123,5 @@ if __name__ == "__main__":
         css=DARK_CSS,
         # Allow Gradio to serve files from drafts/ so the auto-saved reports
         # are downloadable via /gradio_api/file=drafts/*.md links.
-        allowed_paths=[DRAFTS_DIR],
+        allowed_paths=[DRAFTS_DIR, ARTIFACTS_DIR],
     )

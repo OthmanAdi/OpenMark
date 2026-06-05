@@ -74,6 +74,19 @@ _PARENT_THREAD_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "openmark_parent_thread_id", default=None
 )
 
+_AGENT_LABEL: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "openmark_agent_label", default="orchestrator"
+)
+
+
+def set_agent_label(label: str):
+    """Temporarily label nested tool events with the active sub-agent role."""
+    return _AGENT_LABEL.set(label or "subagent")
+
+
+def reset_agent_label(token) -> None:
+    _AGENT_LABEL.reset(token)
+
 
 def _emit(thread_id: str, phase: str, **fields: Any) -> None:
     _TOOL_EVENTS.append({"ts": time.time(), "thread_id": thread_id, "phase": phase, **fields})
@@ -265,13 +278,15 @@ def tool_event_middleware(request: Any, handler: Callable[[Any], Any]) -> Any:
         thread_id = _PARENT_THREAD_ID.get()
     if not thread_id:
         thread_id = "default"
+    agent_label = _AGENT_LABEL.get()
 
     # Bind the resolved thread_id so any synchronous sub-agent invocation
     # inside the handler inherits it via _PARENT_THREAD_ID.
     token = _PARENT_THREAD_ID.set(thread_id)
 
     log.info(f"[tool→] {tool_name} args={tool_args!r} thread={thread_id}")
-    _emit(thread_id, "start", tool=tool_name, args=tool_args, tool_id=tool_id)
+    _emit(thread_id, "start", tool=tool_name, args=tool_args, tool_id=tool_id,
+          agent=agent_label)
     t0 = time.time()
     try:
         result = handler(request)
@@ -290,12 +305,14 @@ def tool_event_middleware(request: Any, handler: Callable[[Any], Any]) -> Any:
         preview_short_for_log = preview[:160].replace("\n", " ")
         log.info(f"[tool✓] {tool_name} {dur}ms len={len(preview)} preview={preview_short_for_log!r}")
         _emit(thread_id, "end", tool=tool_name, args=tool_args, tool_id=tool_id,
+              agent=agent_label,
               duration_ms=dur, result_preview=preview)
         return result
     except Exception as e:
         dur = round((time.time() - t0) * 1000, 1)
         log.info(f"[tool✗] {tool_name} {dur}ms error={e!r}")
         _emit(thread_id, "error", tool=tool_name, args=tool_args, tool_id=tool_id,
+              agent=agent_label,
               duration_ms=dur, error=str(e)[:600])
         raise
     finally:

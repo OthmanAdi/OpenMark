@@ -78,6 +78,6 @@ emits a LinkedInPost Pydantic instance returned to you as structured JSON.
 """,
 )
 def task_compose_linkedin(brief: str) -> str:
-    result, dur = invoke_subagent(_get_graph(), brief)
+    result, dur = invoke_subagent(_get_graph(), brief, role="composer-linkedin")
     return format_for_orchestrator(role="composer-linkedin", result=result,
                                    duration_ms=dur, include_structured=True)

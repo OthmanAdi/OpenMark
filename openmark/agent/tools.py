@@ -6,15 +6,117 @@ into the tool message. URLs live in named fields so the synthesizer can
 validate citations against state["seen_urls"].
 """
 
+import os
 import re
 from datetime import datetime, timedelta, timezone  # noqa: F401 (timedelta used in find_all_in_range)
 from functools import lru_cache
+from pathlib import Path
 from langchain_core.tools import tool
 from openmark.embeddings.factory import get_embedder
 from openmark.stores import neo4j_store
 from openmark.agent.schemas import BookmarkHit, ToolResult
 
 _embedder = None
+_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _slugify_filename(value: str, fallback: str = "artifact") -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", (value or "").strip().lower()).strip("-")
+    return (slug or fallback)[:80]
+
+
+def _artifact_dir() -> Path:
+    raw = os.getenv("OPENMARK_OBSIDIAN_ARTIFACT_DIR") or str(_ROOT / "drafts" / "obsidian")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = (_ROOT / path).resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _yaml_quote(value: str) -> str:
+    return '"' + (value or "").replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def _normalize_sources(sources: list[str] | None) -> list[str]:
+    out: list[str] = []
+    for src in sources or []:
+        text = str(src or "").strip()
+        if not text:
+            continue
+        if text not in out:
+            out.append(text[:1000])
+    return out[:60]
+
+
+@tool
+def write_obsidian_artifact(
+    title: str,
+    markdown_body: str,
+    sources: list[str] | None = None,
+    tags: list[str] | None = None,
+) -> str:
+    """
+    Write a local Obsidian-ready Markdown artifact.
+
+    Use this when the user asks for an artifact, Obsidian artifact, local
+    Markdown report, saved report, or says "output in artifact". The artifact
+    must contain the complete polished report body, citations/resources, and
+    any useful context. Do not call this with secrets or credentials.
+    """
+    clean_title = (title or "OpenMark Artifact").strip()[:160]
+    body = (markdown_body or "").strip()
+    if not body:
+        return "[artifact:error] markdown_body is empty; artifact not written."
+
+    safe_tags = []
+    for tag in tags or []:
+        slug = _slugify_filename(str(tag), fallback="tag")
+        if slug and slug not in safe_tags:
+            safe_tags.append(slug)
+    safe_tags = ["openmark", "artifact"] + [t for t in safe_tags if t not in {"openmark", "artifact"}]
+
+    source_rows = _normalize_sources(sources)
+    now = datetime.now(timezone.utc)
+    stamp = now.strftime("%Y-%m-%d-%H%M")
+    filename = f"{stamp}-{_slugify_filename(clean_title)}.md"
+    path = _artifact_dir() / filename
+
+    frontmatter = [
+        "---",
+        f"title: {_yaml_quote(clean_title)}",
+        f"created: {now.isoformat()}",
+        "source: openmark",
+        "tags:",
+        *[f"  - {tag}" for tag in safe_tags],
+        "---",
+        "",
+    ]
+
+    sections: list[str] = []
+    if not body.lstrip().startswith("# "):
+        sections.append(f"# {clean_title}\n")
+    sections.append(body)
+
+    if source_rows and "## resources" not in body.lower() and "## citations" not in body.lower():
+        sections.append("\n## Resources")
+        for i, src in enumerate(source_rows, 1):
+            sections.append(f"{i}. {src}")
+
+    sections.append("\n## Artifact Metadata")
+    sections.append(f"- Created: {now.isoformat()}")
+    sections.append(f"- Tool: `write_obsidian_artifact`")
+    sections.append(f"- Path: `{path}`")
+
+    final = "\n".join(frontmatter + sections).rstrip() + "\n"
+    path.write_text(final, encoding="utf-8")
+    rel = path.relative_to(_ROOT) if path.is_relative_to(_ROOT) else path
+    return (
+        f"[artifact:written] Obsidian artifact saved.\n"
+        f"Absolute path: {path}\n"
+        f"Relative path: {rel}\n"
+        f"Bytes: {path.stat().st_size}"
+    )
 
 def _get_embedder():
     global _embedder

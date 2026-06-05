@@ -66,6 +66,6 @@ list. Returns a NewsletterAnalytical with hook + what-happened + why-it-matters
 """,
 )
 def task_compose_analytical(brief: str) -> str:
-    result, dur = invoke_subagent(_get_graph(), brief)
+    result, dur = invoke_subagent(_get_graph(), brief, role="composer-analytical")
     return format_for_orchestrator(role="composer-analytical", result=result,
                                    duration_ms=dur, include_structured=True)

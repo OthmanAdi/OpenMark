@@ -64,6 +64,6 @@ how-to-read + when-to-pick blocks.
 """,
 )
 def task_compose_comparison(brief: str) -> str:
-    result, dur = invoke_subagent(_get_graph(), brief)
+    result, dur = invoke_subagent(_get_graph(), brief, role="composer-comparison")
     return format_for_orchestrator(role="composer-comparison", result=result,
                                    duration_ms=dur, include_structured=True)

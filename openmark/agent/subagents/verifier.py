@@ -66,6 +66,6 @@ pass + surgical fix_instructions on failure.
 """,
 )
 def task_verify(brief: str) -> str:
-    result, dur = invoke_subagent(_get_graph(), brief)
+    result, dur = invoke_subagent(_get_graph(), brief, role="verifier")
     return format_for_orchestrator(role="verifier", result=result,
                                    duration_ms=dur, include_structured=True)

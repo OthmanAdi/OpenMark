@@ -64,6 +64,6 @@ counter-argument section. 3-5 body sections, 5-8 cited sources.
 """,
 )
 def task_compose_essay(brief: str) -> str:
-    result, dur = invoke_subagent(_get_graph(), brief)
+    result, dur = invoke_subagent(_get_graph(), brief, role="composer-essay")
     return format_for_orchestrator(role="composer-essay", result=result,
                                    duration_ms=dur, include_structured=True)

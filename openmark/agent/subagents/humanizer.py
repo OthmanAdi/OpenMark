@@ -64,6 +64,6 @@ structure, word count, and citations.
 """,
 )
 def task_humanize(brief: str) -> str:
-    result, dur = invoke_subagent(_get_graph(), brief)
+    result, dur = invoke_subagent(_get_graph(), brief, role="humanizer")
     return format_for_orchestrator(role="humanizer", result=result,
                                    duration_ms=dur, include_structured=False)

@@ -83,6 +83,7 @@ FIELDS: tuple[AgentConfigField, ...] = (
     AgentConfigField("OPENMARK_SUBAGENT_MODEL_CALL_LIMIT", "Sub-agent model-call limit", "8", "int", "Sub-agents", "Default model-call cap inside sub-agents.", min_value=1, max_value=100),
     AgentConfigField("OPENMARK_MCP_TRENDRADAR", "TrendRadar MCP", "0", "bool", "Tools", "Adds TrendRadar retrieval tools to researcher when enabled."),
     AgentConfigField("OPENMARK_RERANK", "Cross-encoder rerank", "0", "bool", "Tools", "Enable optional reranking if dependencies are available."),
+    AgentConfigField("OPENMARK_OBSIDIAN_ARTIFACT_DIR", "Obsidian artifact directory", str(ROOT / "drafts" / "obsidian"), "text", "Output", "Local folder where write_obsidian_artifact saves Markdown reports."),
     AgentConfigField("OPENMARK_THEME", "UI theme", "light", "select", "UI", "Theme applied on next restart or page reload.", ("light", "dark", "system")),
     AgentConfigField("OPENMARK_PORT", "UI port", "7860", "int", "UI", "Port used by Gradio on restart.", min_value=1, max_value=65535),
 )

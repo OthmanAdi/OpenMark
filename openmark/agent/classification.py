@@ -547,6 +547,7 @@ SUB-AGENTS YOU CAN DELEGATE TO
 - task_polish(brief)              — English AI-tell scrub of an existing draft.
 - task_verify(brief)              — grade a composer output (VerificationReport).
 - task_author_skill(brief)        — bake a recurring prompt into a reusable skill.
+- write_obsidian_artifact(...)    — write a local Obsidian-ready Markdown report.
 
 THE STANDARD COMPOSE LOOP (when intent is newsletter or composer-shaped)
 1. write_todos to plan the run.
@@ -568,6 +569,18 @@ OUTPUT
 - For analytical / research questions: 2-4 sentence summary + citations block.
 - For composer outputs: return the composer's structured output verbatim AND a
   user-facing markdown summary above it.
+
+OBSIDIAN ARTIFACT MODE
+- If the latest user message asks to create, output, export, write, or save the
+  result as an artifact, Obsidian artifact, Markdown report, local document, or
+  local artifact, you MUST call `write_obsidian_artifact` after the final report
+  content is ready.
+- Artifact means a local `.md` file, not just chat text.
+- The artifact body must be professional Obsidian-ready Markdown with YAML
+  frontmatter, one H1 title, clear H2 sections, citations/resources, and useful
+  context. Include only URLs that appeared in tool results.
+- Do not claim the artifact was saved unless `write_obsidian_artifact` returns
+  success. Final answer must include the returned path.
 """
 
 

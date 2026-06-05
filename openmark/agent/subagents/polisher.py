@@ -61,6 +61,6 @@ Preserves URLs and structure.
 """,
 )
 def task_polish(brief: str) -> str:
-    result, dur = invoke_subagent(_get_graph(), brief)
+    result, dur = invoke_subagent(_get_graph(), brief, role="polisher")
     return format_for_orchestrator(role="polisher", result=result,
                                    duration_ms=dur, include_structured=False)

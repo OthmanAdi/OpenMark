@@ -135,12 +135,17 @@ def test_skill_author_only_has_write_skill():
 def test_orchestrator_tool_surface_is_small():
     """Orchestrator has task_* delegators plus safe utility tools."""
     from openmark.agent.subagents import ALL_SUBAGENT_TOOLS
-    from openmark.agent.tools import write_skill
+    from openmark.agent.tools import write_obsidian_artifact, write_skill
 
-    expected_top_level = {t.name for t in ALL_SUBAGENT_TOOLS} | {"write_skill", "remember_preference"}
-    # 10 delegators + write_skill + remember_preference = 12. load_skill is
+    expected_top_level = {t.name for t in ALL_SUBAGENT_TOOLS} | {
+        "write_obsidian_artifact",
+        "write_skill",
+        "remember_preference",
+    }
+    # 10 delegators + write_obsidian_artifact + write_skill + remember_preference = 13. load_skill is
     # injected by OpenMarkSkillMiddleware, not as a top-level tool.
-    assert len(expected_top_level) == 12
+    assert write_obsidian_artifact is not None
+    assert len(expected_top_level) == 13
 
 
 def test_orchestrator_compiles():

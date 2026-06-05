@@ -43,6 +43,8 @@ from openmark.agent.mcp.registry import Scope
 from openmark.agent.middleware import (
     OpenMarkSkillMiddleware,
     load_skill as _load_skill_tool,
+    reset_agent_label,
+    set_agent_label,
     tool_event_middleware,
 )
 
@@ -328,11 +330,15 @@ def format_for_orchestrator(
     return "\n".join(body).strip()
 
 
-def invoke_subagent(graph, brief: str) -> tuple[dict, float]:
+def invoke_subagent(graph, brief: str, *, role: str = "subagent") -> tuple[dict, float]:
     """Invoke a compiled sub-agent graph with a brief, return (result, duration_ms)."""
     t0 = time.time()
-    result = graph.invoke({"messages": [{"role": "user", "content": brief}]})
-    return result, (time.time() - t0) * 1000.0
+    token = set_agent_label(role)
+    try:
+        result = graph.invoke({"messages": [{"role": "user", "content": brief}]})
+        return result, (time.time() - t0) * 1000.0
+    finally:
+        reset_agent_label(token)
 
 
 def task_tool(role: str, description: str) -> Callable:

@@ -59,7 +59,7 @@ from openmark.agent.middleware import (
 )
 from openmark.agent.memory import PreferenceMemoryMiddleware, get_store, remember_preference
 from openmark.agent.subagents import ALL_SUBAGENT_TOOLS
-from openmark.agent.tools import warm_up as _warm_up_tools, write_skill
+from openmark.agent.tools import warm_up as _warm_up_tools, write_obsidian_artifact, write_skill
 
 
 # ── Checkpointer ────────────────────────────────────────────────────────────
@@ -118,7 +118,11 @@ def build_agent():
     # - any MCP-server tools mapped to scope='orchestrator' in the registry
     # NOTE: load_skill is auto-registered by OpenMarkSkillMiddleware.
     from openmark.agent.mcp import load_tools_for as _load_mcp_tools_for
-    orchestrator_tools: list = list(ALL_SUBAGENT_TOOLS) + [write_skill, remember_preference]
+    orchestrator_tools: list = list(ALL_SUBAGENT_TOOLS) + [
+        write_skill,
+        write_obsidian_artifact,
+        remember_preference,
+    ]
     mcp_tools = _load_mcp_tools_for("orchestrator")
     if mcp_tools:
         orchestrator_tools.extend(mcp_tools)
@@ -174,6 +178,10 @@ def build_agent():
         ToolCallLimitMiddleware(
             tool_name="task_compose_analytical",
             run_limit=_env_int("OPENMARK_COMPOSE_ANALYTICAL_CALL_LIMIT", 2),
+        ),
+        ToolCallLimitMiddleware(
+            tool_name="write_obsidian_artifact",
+            run_limit=2,
         ),
         # 8. Retry on transient model failures.
         ModelRetryMiddleware(
@@ -351,13 +359,24 @@ def ask_stream(agent, question: str, thread_id: str = "default"):
             phase = ev.get("phase")
             if phase == "start":
                 out.append({"kind": "tool_start", "tool": ev.get("tool"),
-                            "args": ev.get("args", {})})
+                            "args": ev.get("args", {}),
+                            "agent": ev.get("agent", "orchestrator"),
+                            "tool_id": ev.get("tool_id", ""),
+                            "ts": ev.get("ts")})
             elif phase == "end":
                 out.append({"kind": "tool_end", "tool": ev.get("tool"),
+                            "args": ev.get("args", {}),
+                            "agent": ev.get("agent", "orchestrator"),
+                            "tool_id": ev.get("tool_id", ""),
+                            "ts": ev.get("ts"),
                             "duration_ms": ev.get("duration_ms"),
                             "preview": ev.get("result_preview", "")})
             elif phase == "error":
                 out.append({"kind": "tool_error", "tool": ev.get("tool"),
+                            "args": ev.get("args", {}),
+                            "agent": ev.get("agent", "orchestrator"),
+                            "tool_id": ev.get("tool_id", ""),
+                            "ts": ev.get("ts"),
                             "error": ev.get("error", "")})
         return out
 
