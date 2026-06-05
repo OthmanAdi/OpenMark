@@ -18,6 +18,7 @@ exactly once per process.
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any, Callable, Sequence
 
@@ -44,6 +45,17 @@ from openmark.agent.middleware import (
     load_skill as _load_skill_tool,
     tool_event_middleware,
 )
+
+
+def _env_int(name: str, default: int, *, min_value: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(min_value, value)
 
 
 def make_subagent_graph(
@@ -82,6 +94,18 @@ def make_subagent_graph(
     Sub-agent prompts that hardcode `CALL load_skill('X')` now have a real
     tool to invoke instead of improvising from training.
     """
+    context_edit_trigger = _env_int("OPENMARK_SUBAGENT_CONTEXT_EDIT_TRIGGER", context_edit_trigger)
+    context_edit_keep = _env_int("OPENMARK_SUBAGENT_CONTEXT_EDIT_KEEP", context_edit_keep)
+    run_limit = _env_int("OPENMARK_SUBAGENT_MODEL_CALL_LIMIT", run_limit)
+    summarization_trigger = (
+        summarization_trigger[0],
+        _env_int("OPENMARK_SUBAGENT_SUMMARY_TRIGGER", summarization_trigger[1]),
+    )
+    summarization_keep = (
+        summarization_keep[0],
+        _env_int("OPENMARK_SUBAGENT_SUMMARY_KEEP", summarization_keep[1]),
+    )
+
     mw: list[AgentMiddleware] = [
         ContextEditingMiddleware(
             edits=[ClearToolUsesEdit(trigger=context_edit_trigger, keep=context_edit_keep)],

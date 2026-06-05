@@ -46,7 +46,6 @@ def _get_graph():
             tools=[],
             system_prompt=PROMPT,
             response_schema=NewsletterEssay,
-            include_skills=False,                # orchestrator already preloads
             run_limit=4,
             summarization_trigger=("tokens", 30_000),
             context_edit_trigger=40_000,

@@ -28,6 +28,7 @@ from openmark.agent.tools import (
     graph_expand,
     reddit_search,
     run_cypher,
+    search_hybrid,
     search_by_category,
     search_by_community,
     search_by_date_range,
@@ -43,6 +44,7 @@ from openmark.agent.tools import (
 
 RESEARCHER_TOOLS = [
     # OpenMark graph retrieval (16)
+    search_hybrid,
     search_semantic,
     search_by_category,
     search_by_community,

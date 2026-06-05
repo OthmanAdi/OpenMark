@@ -69,14 +69,14 @@ def test_every_subagent_has_load_skill_tool(name, mod_path):
 
 
 def test_researcher_keeps_all_retrieval_tools():
-    """Regression: the fix must not strip researcher's 21 retrieval tools."""
+    """Regression: the fix must not strip researcher's retrieval tools."""
     import openmark.agent.subagents.researcher as r
     tools = _tools_of(r._get_graph())
     must_have = {
         "search_semantic", "search_by_category", "search_by_community",
         "find_by_tag", "explore_tag_cluster", "graph_expand",
         "find_by_domain", "find_by_source", "search_linkedin", "search_youtube",
-        "find_recent", "search_by_date_range", "get_bookmark_full",
+        "find_recent", "search_by_date_range", "search_hybrid", "get_bookmark_full",
         "get_stats", "run_cypher", "web_search", "web_fetch", "web_extract",
         "web_crawl", "github_repo_intel", "reddit_search",
     }

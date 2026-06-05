@@ -11,6 +11,7 @@ A single `langchain.agents.create_agent` graph with pure-LangChain middleware:
   Resilience        -> ModelRetryMiddleware + ModelFallbackMiddleware + ToolRetryMiddleware
   UI integration    -> tool_event_middleware (existing event bus)
   Skill catalogue   -> OpenMarkSkillMiddleware + slash_skill_loader (kept)
+  Preferences       -> PreferenceMemoryMiddleware + LangGraph SQLite store
   Persistence       -> SqliteSaver checkpointer (state survives restart)
 
 The orchestrator has NO retrieval tools. Every search / fetch / compose path
@@ -56,6 +57,7 @@ from openmark.agent.middleware import (
     slash_skill_loader,
     tool_event_middleware,
 )
+from openmark.agent.memory import PreferenceMemoryMiddleware, get_store, remember_preference
 from openmark.agent.subagents import ALL_SUBAGENT_TOOLS
 from openmark.agent.tools import warm_up as _warm_up_tools, write_skill
 
@@ -83,6 +85,18 @@ def _build_checkpointer():
         return MemorySaver()
 
 
+def _env_int(name: str, default: int, *, min_value: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.info(f"[config] invalid integer {name}={raw!r}; using {default}")
+        return default
+    return max(min_value, value)
+
+
 # ── Build agent ─────────────────────────────────────────────────────────────
 
 
@@ -100,10 +114,11 @@ def build_agent():
     # Tools the orchestrator can call directly:
     # - 10 task_* delegators (sub-agents)
     # - write_skill (sandboxed skill author shortcut)
+    # - remember_preference (narrow, explicit long-term preference memory)
     # - any MCP-server tools mapped to scope='orchestrator' in the registry
     # NOTE: load_skill is auto-registered by OpenMarkSkillMiddleware.
     from openmark.agent.mcp import load_tools_for as _load_mcp_tools_for
-    orchestrator_tools: list = list(ALL_SUBAGENT_TOOLS) + [write_skill]
+    orchestrator_tools: list = list(ALL_SUBAGENT_TOOLS) + [write_skill, remember_preference]
     mcp_tools = _load_mcp_tools_for("orchestrator")
     if mcp_tools:
         orchestrator_tools.extend(mcp_tools)
@@ -126,22 +141,40 @@ def build_agent():
         dynamic_orchestrator_prompt,
         # 3. Trim bulky tool outputs (sub-agent results can be large).
         ContextEditingMiddleware(
-            edits=[ClearToolUsesEdit(trigger=120_000, keep=4)],
+            edits=[ClearToolUsesEdit(
+                trigger=_env_int("OPENMARK_CONTEXT_EDIT_TRIGGER", 120_000),
+                keep=_env_int("OPENMARK_CONTEXT_EDIT_KEEP", 4),
+            )],
         ),
         # 4. Fallback summarization for very long threads.
         SummarizationMiddleware(
             model=summarizer,
-            trigger=[("tokens", 100_000), ("messages", 80)],
-            keep=("messages", 24),
+            trigger=[
+                ("tokens", _env_int("OPENMARK_SUMMARY_TOKEN_TRIGGER", 100_000)),
+                ("messages", _env_int("OPENMARK_SUMMARY_MESSAGE_TRIGGER", 80)),
+            ],
+            keep=("messages", _env_int("OPENMARK_SUMMARY_KEEP_MESSAGES", 24)),
         ),
         # 5. Planner — orchestrator writes its own todo list.
         TodoListMiddleware(),
         # 6. Hard cap per turn (sub-agent fanout can chain).
-        ModelCallLimitMiddleware(run_limit=30, exit_behavior="end"),
+        ModelCallLimitMiddleware(
+            run_limit=_env_int("OPENMARK_ORCH_MODEL_CALL_LIMIT", 30),
+            exit_behavior="end",
+        ),
         # 7. Global + per-tool tool-call caps.
-        ToolCallLimitMiddleware(run_limit=40, exit_behavior="continue"),
-        ToolCallLimitMiddleware(tool_name="task_compose_essay",      run_limit=2),
-        ToolCallLimitMiddleware(tool_name="task_compose_analytical", run_limit=2),
+        ToolCallLimitMiddleware(
+            run_limit=_env_int("OPENMARK_ORCH_TOOL_CALL_LIMIT", 40),
+            exit_behavior="continue",
+        ),
+        ToolCallLimitMiddleware(
+            tool_name="task_compose_essay",
+            run_limit=_env_int("OPENMARK_COMPOSE_ESSAY_CALL_LIMIT", 2),
+        ),
+        ToolCallLimitMiddleware(
+            tool_name="task_compose_analytical",
+            run_limit=_env_int("OPENMARK_COMPOSE_ANALYTICAL_CALL_LIMIT", 2),
+        ),
         # 8. Retry on transient model failures.
         ModelRetryMiddleware(
             max_retries=3, backoff_factor=2.0, initial_delay=1.0, max_delay=30.0,
@@ -151,6 +184,8 @@ def build_agent():
         slash_skill_loader,
         # 10. Skill catalogue (custom; injects load_skill tool + skill list).
         OpenMarkSkillMiddleware(),
+        # 10b. Cross-thread preference memory, explicit user saves only.
+        PreferenceMemoryMiddleware(),
         # 11. Tool retry for flaky sub-agent calls.
         ToolRetryMiddleware(max_retries=2),
         # 12. UI event bus — surfaces every tool call as a live card.
@@ -167,6 +202,7 @@ def build_agent():
         middleware=middleware,
         state_schema=OrchestratorState,
         checkpointer=_build_checkpointer(),
+        store=get_store(),
     )
     log.info(f"[build_agent] compiled in {int((time.time()-t0)*1000)}ms with "
              f"{len(orchestrator_tools)} tools + {len(middleware)} middleware")

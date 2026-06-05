@@ -629,6 +629,22 @@ def dynamic_orchestrator_prompt(request: ModelRequest) -> str:
     hint = _INTENT_HINTS.get(intent, _INTENT_HINTS["fast"])
     out = base + "\n\n" + hint
 
+    try:
+        from openmark import config as _config
+        from openmark.models import role_model_id
+        model_id = role_model_id("orchestrator")
+        provider = getattr(_config, "AGENT_PROVIDER", "azure")
+    except Exception:
+        model_id = "unknown"
+        provider = "unknown"
+    out += (
+        f"\n\nMODEL IDENTITY: This OpenMark chat orchestrator is configured "
+        f"with AGENT_PROVIDER={provider} and orchestrator model={model_id}. "
+        "If the user asks which LLM or model you are using, answer with these "
+        "configured values and say you cannot independently verify the upstream "
+        "provider's internal serving alias beyond this configuration."
+    )
+
     # Complexity gate: keep simple requests clean — no write_todos theatre.
     # When complex=True, encourage planning. When complex=False, forbid
     # write_todos so the UI doesn't get a stack of "marked completed" cards.

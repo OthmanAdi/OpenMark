@@ -40,6 +40,7 @@ def test_researcher_has_full_retrieval_slice():
     tool_names = {getattr(t, "name", "") for t in RESEARCHER_TOOLS}
     must_have = {
         "search_semantic",
+        "search_hybrid",
         "search_by_category",
         "search_by_community",
         "find_by_tag",
@@ -64,7 +65,7 @@ def test_researcher_has_full_retrieval_slice():
     }
     missing = must_have - tool_names
     assert not missing, f"researcher missing: {missing}"
-    assert len(RESEARCHER_TOOLS) == 22
+    assert len(RESEARCHER_TOOLS) == 23
 
 
 def test_composer_format_to_tool_map_complete():
@@ -132,14 +133,14 @@ def test_skill_author_only_has_write_skill():
 
 
 def test_orchestrator_tool_surface_is_small():
-    """Orchestrator has only task_* delegators + write_skill + load_skill (from middleware)."""
+    """Orchestrator has task_* delegators plus safe utility tools."""
     from openmark.agent.subagents import ALL_SUBAGENT_TOOLS
     from openmark.agent.tools import write_skill
 
-    expected_top_level = {t.name for t in ALL_SUBAGENT_TOOLS} | {"write_skill"}
-    # 10 delegators + write_skill = 11 (load_skill gets injected by the
-    # OpenMarkSkillMiddleware, not as a top-level tool).
-    assert len(expected_top_level) == 11
+    expected_top_level = {t.name for t in ALL_SUBAGENT_TOOLS} | {"write_skill", "remember_preference"}
+    # 10 delegators + write_skill + remember_preference = 12. load_skill is
+    # injected by OpenMarkSkillMiddleware, not as a top-level tool.
+    assert len(expected_top_level) == 12
 
 
 def test_orchestrator_compiles():
