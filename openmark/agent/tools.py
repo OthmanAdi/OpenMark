@@ -362,8 +362,9 @@ def find_recent(days: int = 7, query: str = "", n: int = 25) -> str:
                 OPTIONAL MATCH (b)-[:TAGGED]->(t:Tag)
                 RETURN b.url AS url, b.title AS title, b.score AS bm_score,
                        b.source AS source, b.category AS category,
+                       toString(b.created_at) AS created_at,
                        collect(t.name)[..6] AS tags
-                ORDER BY b.created_at DESC LIMIT $n
+                ORDER BY created_at DESC LIMIT $n
             """, {"cutoff": cutoff, "n": n})
         hits = [_row_to_hit(r) for r in rows]
         note = ("Only LinkedIn nodes have timestamps. Edge / Raindrop / YouTube "
@@ -412,8 +413,9 @@ def search_by_date_range(from_iso: str, to_iso: str, query: str = "", n: int = 3
                 OPTIONAL MATCH (b)-[:TAGGED]->(t:Tag)
                 RETURN b.url AS url, b.title AS title, b.score AS bm_score,
                        b.source AS source, b.category AS category,
+                       toString(b.created_at) AS created_at,
                        collect(t.name)[..6] AS tags
-                ORDER BY b.created_at DESC LIMIT $n
+                ORDER BY created_at DESC LIMIT $n
             """, {"from_iso": from_iso, "to_iso": to_iso, "n": n})
         hits = [_row_to_hit(r) for r in rows]
         return ToolResult(
@@ -507,7 +509,7 @@ def find_all_in_range(
             RETURN b.url AS url, b.title AS title, b.score AS bm_score,
                    b.source AS source, b.category AS category,
                    toString(b.created_at) AS created_at, tags
-            ORDER BY b.created_at DESC
+            ORDER BY created_at DESC
             SKIP $skip LIMIT $page_size
             """,
             {"from_iso": from_iso, "to_iso": to_iso,

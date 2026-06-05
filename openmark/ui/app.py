@@ -262,11 +262,7 @@ def _clean_copy_block(clean_text: str, *, idx: int) -> str:
         f'overflow:hidden;pointer-events:none">{_html_mod.escape(clean_text)}</textarea>'
     )
     btn_html = (
-        f'<button id="{btn_id}" type="button" style="'
-        f'display:inline-flex;align-items:center;gap:6px;'
-        f'background:#1e293b;color:#cbd5e1;border:1px solid #334155;'
-        f'padding:5px 12px;border-radius:6px;font-size:0.82em;cursor:pointer;'
-        f'margin:0 0 10px 0" '
+        f'<button id="{btn_id}" class="om-copy-btn" type="button" '
         f'onclick="(function(b){{const s=document.getElementById(\'{src_id}\');'
         f'if(!s)return;navigator.clipboard.writeText(s.value).then(function(){{'
         f'const o=b.innerHTML;b.innerHTML=\'\\u2713 Copied\';'
@@ -320,17 +316,16 @@ def _todo_card(args: dict, *, update_count: int) -> str:
         rows.append(
             f"<li style='padding:3px 0;color:{color};font-size:0.9em'>"
             f"<span style='display:inline-block;width:22px'>{icon}</span>"
-            f"<span style='color:#e2e8f0'>{_esc(content)}</span></li>"
+            f"<span class='om-title'>{_esc(content)}</span></li>"
         )
     header = (
-        f"\U0001f4cb <b style='color:#e2e8f0'>Todo list</b> "
-        f"<span style='color:#94a3b8'>"
+        f"\U0001f4cb <b class='om-title'>Todo list</b> "
+        f"<span class='om-muted'>"
         f"· {completed}/{n} complete · "
         f"updated {update_count}× this turn</span>"
     )
     return (
-        f"<div style='background:#0f172a;border-left:3px solid #a855f7;"
-        f"padding:8px 14px;margin:8px 0;border-radius:6px'>"
+        f"<div class='om-agent-card om-todo'>"
         f"<div style='margin-bottom:6px;font-size:0.88em'>{header}</div>"
         f"<ul style='list-style:none;padding:0;margin:0;line-height:1.5'>"
         + "".join(rows) +
@@ -346,10 +341,9 @@ def _tool_card(ev: dict) -> str:
     args = _fmt_args(ev.get("args", {}))
     phase = ev.get("phase")
     if phase == "start":
-        return (f"<div style='background:#0f172a;border-left:3px solid #6366f1;"
-                f"padding:6px 10px;margin:6px 0;border-radius:4px;font-size:0.85em;color:#94a3b8'>"
-                f"🔧 <b style='color:#a5b4fc'>{name}</b>({_esc(args)}) "
-                f"<i style='color:#475569'>running…</i></div>")
+        return (f"<div class='om-agent-card om-tool-start' style='font-size:0.85em'>"
+                f"🔧 <b class='om-accent'>{name}</b>({_esc(args)}) "
+                f"<i class='om-muted'>running…</i></div>")
     if phase == "end":
         dur = ev.get("duration_ms", 0)
         full = ev.get("result_preview", "") or ""
@@ -359,32 +353,27 @@ def _tool_card(ev: dict) -> str:
         tail = full[1500:] if n_chars > 1500 else ""
         head_html = _esc(head).replace("\n", "<br>")
         body = (
-            f"<div style='color:#cbd5e1;font-size:0.85em;margin-top:4px;"
-            f"max-height:280px;overflow:auto;background:#0b1220;padding:6px 8px;"
-            f"border-radius:4px;font-family:ui-monospace,Menlo,monospace;line-height:1.45'>"
+            f"<div class='om-codeblock' style='font-size:0.85em;margin-top:4px;max-height:280px'>"
             f"{head_html}"
             f"</div>"
         )
         if tail:
             body += (
-                f"<details style='margin-top:4px;font-size:0.78em;color:#64748b'>"
+                f"<details class='om-muted' style='margin-top:4px;font-size:0.78em'>"
                 f"<summary style='cursor:pointer'>show {n_chars - 1500} more chars</summary>"
-                f"<pre style='white-space:pre-wrap;background:#0b1220;padding:6px 8px;"
-                f"border-radius:4px;max-height:420px;overflow:auto;color:#cbd5e1'>"
+                f"<pre class='om-codeblock'>"
                 f"{_esc(tail)}</pre></details>"
             )
         return (
-            f"<div style='background:#0f172a;border-left:3px solid #22c55e;"
-            f"padding:6px 10px;margin:6px 0;border-radius:4px;font-size:0.85em'>"
-            f"<div style='color:#86efac'>✓ <b>{name}</b>({_esc(args)}) "
-            f"<span style='color:#64748b'>· {dur} ms · {n_chars:,} chars</span></div>"
+            f"<div class='om-agent-card om-tool-end' style='font-size:0.85em'>"
+            f"<div class='om-success'>✓ <b>{name}</b>({_esc(args)}) "
+            f"<span class='om-muted'>· {dur} ms · {n_chars:,} chars</span></div>"
             f"{body}"
             f"</div>"
         )
     if phase == "error":
         err = ev.get("error", "")
-        return (f"<div style='background:#0f172a;border-left:3px solid #ef4444;"
-                f"padding:6px 10px;margin:6px 0;border-radius:4px;font-size:0.85em;color:#fca5a5'>"
+        return (f"<div class='om-agent-card om-tool-error om-danger' style='font-size:0.85em'>"
                 f"✗ <b>{name}</b>({_esc(args)}) · {_esc(err)}</div>")
     return ""
 
@@ -529,13 +518,10 @@ def chat_fn(message: str, history: list, session_id: int | None):
                 if t:
                     per_turn_thinking.append(t)
                     parts.append(
-                        f"<details style='background:#0f172a;border-left:3px solid #a855f7;"
-                        f"padding:6px 10px;margin:6px 0;border-radius:4px;font-size:0.85em'>"
-                        f"<summary style='color:#c4b5fd;cursor:pointer'>"
+                        f"<details class='om-agent-card om-thinking' style='font-size:0.85em'>"
+                        f"<summary class='om-thinking-label' style='cursor:pointer'>"
                         f"🧠 Thinking · turn {turn_counter} · {len(t):,} chars</summary>"
-                        f"<pre style='white-space:pre-wrap;background:#0b1220;padding:6px 8px;"
-                        f"border-radius:4px;max-height:340px;overflow:auto;color:#cbd5e1;"
-                        f"margin-top:4px;font-size:0.92em;line-height:1.45'>{_esc(t)}</pre>"
+                        f"<pre class='om-codeblock' style='max-height:340px;margin-top:4px;font-size:0.92em'>{_esc(t)}</pre>"
                         f"</details>"
                     )
             elif kind == "tool_start":
@@ -612,10 +598,9 @@ def chat_fn(message: str, history: list, session_id: int | None):
                 # showed the tool cards live; the collapsible just keeps them
                 # available for review.
                 collapsed_trace = (
-                    f"<details style='margin:14px 0;border:1px solid #1e293b;"
-                    f"border-radius:6px;padding:6px 10px;background:#0b1220'>"
-                    f"<summary style='cursor:pointer;color:#94a3b8;font-size:0.85em'>"
-                    f"🛠 <b style='color:#cbd5e1'>{n_calls} tool call(s) "
+                    f"<details class='om-agent-card' style='margin:14px 0'>"
+                    f"<summary class='om-muted' style='cursor:pointer;font-size:0.85em'>"
+                    f"🛠 <b class='om-title'>{n_calls} tool call(s) "
                     f"+ reasoning trace</b> — click to expand</summary>"
                     f"\n\n" + "\n\n".join(parts) + "\n\n</details>"
                 )
@@ -760,11 +745,43 @@ BASE_CSS = """
 footer { display: none !important; }
 #search-list { overflow-y: auto; max-height: 680px; }
 #search-graph iframe { border-radius: 12px; }
+#om-chatbot, #om-chatbot .prose, #om-chatbot .markdown { color: #0f172a !important; }
+#om-chatbot p, #om-chatbot li, #om-chatbot td, #om-chatbot th { color: #0f172a !important; opacity: 1 !important; }
+#om-chatbot a { color: #3730a3 !important; }
+#om-chatbot pre, #om-chatbot code { background: #f8fafc !important; color: #0f172a !important; opacity: 1 !important; text-shadow: none !important; }
+#om-chatbot .om-agent-card { background: #f8fafc !important; color: #0f172a !important; border: 1px solid #cbd5e1 !important; border-left-width: 4px !important; padding: 8px 12px; margin: 8px 0; border-radius: 8px; box-shadow: 0 1px 2px rgba(15, 23, 42, .06); }
+#om-chatbot .om-tool-start { border-left-color: #6366f1 !important; }
+#om-chatbot .om-tool-end { border-left-color: #16a34a !important; }
+#om-chatbot .om-tool-error { border-left-color: #ef4444 !important; }
+#om-chatbot .om-thinking { border-left-color: #a855f7 !important; }
+#om-chatbot .om-todo { border-left-color: #8b5cf6 !important; }
+#om-chatbot .om-muted { color: #475569 !important; opacity: 1 !important; }
+#om-chatbot .om-title { color: #111827 !important; font-weight: 700; }
+#om-chatbot .om-accent { color: #4f46e5 !important; font-weight: 700; }
+#om-chatbot .om-success { color: #15803d !important; font-weight: 700; }
+#om-chatbot .om-danger { color: #b91c1c !important; font-weight: 700; }
+#om-chatbot .om-thinking-label { color: #7e22ce !important; }
+#om-chatbot .om-codeblock { background: #ffffff !important; color: #0f172a !important; border: 1px solid #cbd5e1 !important; border-radius: 6px; padding: 8px 10px; max-height: 420px; overflow: auto; line-height: 1.5; font-family: ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; opacity: 1 !important; }
+#om-chatbot details, #om-chatbot summary, #om-chatbot details * { opacity: 1 !important; text-shadow: none !important; }
+#om-chatbot .om-copy-btn { display: inline-flex; align-items: center; gap: 6px; background: #ffffff; color: #1e293b; border: 1px solid #cbd5e1; padding: 5px 12px; border-radius: 6px; font-size: .82em; cursor: pointer; margin: 0 0 10px 0; }
+#om-chatbot .om-copy-btn:focus-visible { outline: 2px solid #6366f1; outline-offset: 2px; }
 """
 
 # Dark-only override applied when OPENMARK_THEME=dark.
 DARK_OVERRIDE_CSS = """
 body, .gradio-container { background: #020617 !important; color: #e2e8f0 !important; }
+#om-chatbot, #om-chatbot .prose, #om-chatbot .markdown, #om-chatbot p, #om-chatbot li, #om-chatbot td, #om-chatbot th { color: #e2e8f0 !important; }
+#om-chatbot a { color: #7dd3fc !important; }
+#om-chatbot pre, #om-chatbot code { background: #0b1220 !important; color: #cbd5e1 !important; }
+#om-chatbot .om-agent-card { background: #0f172a !important; color: #cbd5e1 !important; border-color: #334155 !important; box-shadow: none; }
+#om-chatbot .om-muted { color: #94a3b8 !important; }
+#om-chatbot .om-title { color: #e2e8f0 !important; }
+#om-chatbot .om-accent { color: #a5b4fc !important; }
+#om-chatbot .om-success { color: #86efac !important; }
+#om-chatbot .om-danger { color: #fca5a5 !important; }
+#om-chatbot .om-thinking-label { color: #c4b5fd !important; }
+#om-chatbot .om-codeblock { background: #0b1220 !important; color: #cbd5e1 !important; border-color: #1e293b !important; }
+#om-chatbot .om-copy-btn { background: #1e293b; color: #cbd5e1; border-color: #334155; }
 """
 
 if OPENMARK_THEME == "dark":
@@ -1199,6 +1216,7 @@ def build_ui():
                 # and is interactive again; step (b) runs in the queue but
                 # leaves the textbox alone.
                 chatbot = gr.Chatbot(
+                    elem_id="om-chatbot",
                     height=620,
                     placeholder=(
                         "<div style='text-align:center;color:#475569;padding:40px'>"

@@ -282,8 +282,9 @@ def find_recent(days: int = 7, query: str = "", n: int = 20) -> dict:
                 OPTIONAL MATCH (b)-[:TAGGED]->(t:Tag)
                 RETURN b.url AS url, b.title AS title, b.score AS bm_score,
                        b.source AS source, b.category AS category,
+                       toString(b.created_at) AS created_at,
                        collect(t.name)[..6] AS tags
-                ORDER BY b.created_at DESC LIMIT $n
+                ORDER BY created_at DESC LIMIT $n
             """, {"cutoff": cutoff, "n": n})
         note = "Only LinkedIn nodes have timestamps. Edge / Raindrop / YouTube need backfill." \
                if not rows else ""
@@ -326,8 +327,9 @@ def search_by_date_range(from_iso: str, to_iso: str, query: str = "", n: int = 2
                 OPTIONAL MATCH (b)-[:TAGGED]->(t:Tag)
                 RETURN b.url AS url, b.title AS title, b.score AS bm_score,
                        b.source AS source, b.category AS category,
+                       toString(b.created_at) AS created_at,
                        collect(t.name)[..6] AS tags
-                ORDER BY b.created_at DESC LIMIT $n
+                ORDER BY created_at DESC LIMIT $n
             """, {"from_iso": from_iso, "to_iso": to_iso, "n": n})
         return _result([_row_to_hit(r) for r in rows], "time",
                        f"{from_iso}..{to_iso} :: {query}")
