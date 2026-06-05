@@ -295,6 +295,11 @@ def setup_louvain(driver=None):
             # Drop projection (frees RAM)
             session.run("CALL gds.graph.drop('bookmark-graph', false)")
 
+            # Re-running hygiene must replace community membership, not append
+            # another IN_COMMUNITY edge to the newly computed community.
+            session.run("MATCH (:Bookmark)-[r:IN_COMMUNITY]->(:Community) DELETE r")
+            session.run("MATCH (c:Community) DETACH DELETE c")
+
             # Create Community nodes + IN_COMMUNITY edges
             session.run("""
                 MATCH (b:Bookmark) WHERE b.community IS NOT NULL
